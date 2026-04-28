@@ -22,181 +22,187 @@ THE SOFTWARE.
 
 */
 
-// Language: Verilog 2001
+// 语言: Verilog 2001
 
 `resetall
 `timescale 1ns / 1ps
 `default_nettype none
 
 /*
- * AXI4 virtual FIFO
+ * AXI4 虚拟 FIFO
+ *
+ * 模块目录：
+ * 1) `axi_vfifo_enc`：把AXI-Stream输入封装成分段数据和控制头
+ * 2) `axi_vfifo_raw` x AXI_CH：每个AXI通道一个原始虚拟FIFO（写外存+读外存）
+ * 3) `axi_vfifo_dec`：把分段数据还原为AXI-Stream输出
+ * 4) 配置/状态同步：负责跨时钟域同步cfg/sts以及全局复位请求
  */
 module axi_vfifo #
 (
-    // AXI channel count
+    // AXI 通道数量
     parameter AXI_CH = 1,
-    // Width of AXI data bus in bits
+    // AXI 数据总线位宽
     parameter AXI_DATA_WIDTH = 32,
-    // Width of AXI address bus in bits
+    // AXI 地址总线位宽
     parameter AXI_ADDR_WIDTH = 16,
-    // Width of AXI wstrb (width of data bus in words)
+    // AXI WSTRB 位宽（按字节）
     parameter AXI_STRB_WIDTH = (AXI_DATA_WIDTH/8),
-    // Width of AXI ID signal
+    // AXI ID 位宽
     parameter AXI_ID_WIDTH = 8,
-    // Maximum AXI burst length to generate
+    // 允许生成的 AXI 最大突发长度
     parameter AXI_MAX_BURST_LEN = 16,
-    // Width of AXI stream interfaces in bits
+    // AXI-Stream 接口位宽
     parameter AXIS_DATA_WIDTH = AXI_DATA_WIDTH*AXI_CH/2,
-    // Use AXI stream tkeep signal
+    // 是否启用 AXI-Stream tkeep
     parameter AXIS_KEEP_ENABLE = (AXIS_DATA_WIDTH>8),
-    // AXI stream tkeep signal width (words per cycle)
+    // AXI-Stream tkeep 位宽（每拍字节数）
     parameter AXIS_KEEP_WIDTH = (AXIS_DATA_WIDTH/8),
-    // Use AXI stream tlast signal
+    // 是否启用 AXI-Stream tlast
     parameter AXIS_LAST_ENABLE = 1,
-    // Propagate AXI stream tid signal
+    // 是否透传 AXI-Stream tid
     parameter AXIS_ID_ENABLE = 0,
-    // AXI stream tid signal width
+    // AXI-Stream tid 位宽
     parameter AXIS_ID_WIDTH = 8,
-    // Propagate AXI stream tdest signal
+    // 是否透传 AXI-Stream tdest
     parameter AXIS_DEST_ENABLE = 0,
-    // AXI stream tdest signal width
+    // AXI-Stream tdest 位宽
     parameter AXIS_DEST_WIDTH = 8,
-    // Propagate AXI stream tuser signal
+    // 是否透传 AXI-Stream tuser
     parameter AXIS_USER_ENABLE = 1,
-    // AXI stream tuser signal width
+    // AXI-Stream tuser 位宽
     parameter AXIS_USER_WIDTH = 1,
-    // Width of length field
+    // 长度字段位宽
     parameter LEN_WIDTH = AXI_ADDR_WIDTH,
-    // Maximum segment width
+    // 最大分段位宽
     parameter MAX_SEG_WIDTH = 256,
-    // Input FIFO depth for AXI write data (full-width words)
+    // AXI 写数据输入 FIFO 深度（全宽字）
     parameter WRITE_FIFO_DEPTH = 64,
-    // Max AXI write burst length
+    // AXI 最大写突发长度
     parameter WRITE_MAX_BURST_LEN = WRITE_FIFO_DEPTH/4,
-    // Output FIFO depth for AXI read data (full-width words)
+    // AXI 读数据输出 FIFO 深度（全宽字）
     parameter READ_FIFO_DEPTH = 128,
-    // Max AXI read burst length
+    // AXI 最大读突发长度
     parameter READ_MAX_BURST_LEN = WRITE_MAX_BURST_LEN
 )
 (
-    input  wire                               clk,
-    input  wire                               rst,
+    input  wire                               clk, // 顶层配置时钟（用于配置寄存与状态采样）
+    input  wire                               rst, // 顶层配置复位
 
     /*
-     * AXI stream data input
+     * AXI-Stream 数据输入
      */
-    input  wire                               s_axis_clk,
-    input  wire                               s_axis_rst,
-    output wire                               s_axis_rst_out,
-    input  wire [AXIS_DATA_WIDTH-1:0]         s_axis_tdata,
-    input  wire [AXIS_KEEP_WIDTH-1:0]         s_axis_tkeep,
-    input  wire                               s_axis_tvalid,
-    output wire                               s_axis_tready,
-    input  wire                               s_axis_tlast,
-    input  wire [AXIS_ID_WIDTH-1:0]           s_axis_tid,
-    input  wire [AXIS_DEST_WIDTH-1:0]         s_axis_tdest,
-    input  wire [AXIS_USER_WIDTH-1:0]         s_axis_tuser,
+    input  wire                               s_axis_clk, // AXI-Stream输入时钟
+    input  wire                               s_axis_rst, // AXI-Stream输入复位
+    output wire                               s_axis_rst_out, // 输入侧复位反馈（任一通道请求复位时拉高）
+    input  wire [AXIS_DATA_WIDTH-1:0]         s_axis_tdata, // AXI-Stream输入数据
+    input  wire [AXIS_KEEP_WIDTH-1:0]         s_axis_tkeep, // AXI-Stream输入字节有效掩码
+    input  wire                               s_axis_tvalid, // AXI-Stream输入有效
+    output wire                               s_axis_tready, // AXI-Stream输入就绪
+    input  wire                               s_axis_tlast, // AXI-Stream输入帧尾
+    input  wire [AXIS_ID_WIDTH-1:0]           s_axis_tid, // AXI-Stream输入ID
+    input  wire [AXIS_DEST_WIDTH-1:0]         s_axis_tdest, // AXI-Stream输入目的地
+    input  wire [AXIS_USER_WIDTH-1:0]         s_axis_tuser, // AXI-Stream输入用户侧带
 
     /*
-     * AXI stream data output
+     * AXI-Stream 数据输出
      */
-    input  wire                               m_axis_clk,
-    input  wire                               m_axis_rst,
-    output wire                               m_axis_rst_out,
-    output wire [AXIS_DATA_WIDTH-1:0]         m_axis_tdata,
-    output wire [AXIS_KEEP_WIDTH-1:0]         m_axis_tkeep,
-    output wire                               m_axis_tvalid,
-    input  wire                               m_axis_tready,
-    output wire                               m_axis_tlast,
-    output wire [AXIS_ID_WIDTH-1:0]           m_axis_tid,
-    output wire [AXIS_DEST_WIDTH-1:0]         m_axis_tdest,
-    output wire [AXIS_USER_WIDTH-1:0]         m_axis_tuser,
+    input  wire                               m_axis_clk, // AXI-Stream输出时钟
+    input  wire                               m_axis_rst, // AXI-Stream输出复位
+    output wire                               m_axis_rst_out, // 输出侧复位反馈（任一通道请求复位时拉高）
+    output wire [AXIS_DATA_WIDTH-1:0]         m_axis_tdata, // AXI-Stream输出数据
+    output wire [AXIS_KEEP_WIDTH-1:0]         m_axis_tkeep, // AXI-Stream输出字节有效掩码
+    output wire                               m_axis_tvalid, // AXI-Stream输出有效
+    input  wire                               m_axis_tready, // AXI-Stream输出就绪
+    output wire                               m_axis_tlast, // AXI-Stream输出帧尾
+    output wire [AXIS_ID_WIDTH-1:0]           m_axis_tid, // AXI-Stream输出ID
+    output wire [AXIS_DEST_WIDTH-1:0]         m_axis_tdest, // AXI-Stream输出目的地
+    output wire [AXIS_USER_WIDTH-1:0]         m_axis_tuser, // AXI-Stream输出用户侧带
 
     /*
-     * AXI master interfaces
+     * AXI 主接口
      */
-    input  wire [AXI_CH-1:0]                  m_axi_clk,
-    input  wire [AXI_CH-1:0]                  m_axi_rst,
-    output wire [AXI_CH*AXI_ID_WIDTH-1:0]     m_axi_awid,
-    output wire [AXI_CH*AXI_ADDR_WIDTH-1:0]   m_axi_awaddr,
-    output wire [AXI_CH*8-1:0]                m_axi_awlen,
-    output wire [AXI_CH*3-1:0]                m_axi_awsize,
-    output wire [AXI_CH*2-1:0]                m_axi_awburst,
-    output wire [AXI_CH-1:0]                  m_axi_awlock,
-    output wire [AXI_CH*4-1:0]                m_axi_awcache,
-    output wire [AXI_CH*3-1:0]                m_axi_awprot,
-    output wire [AXI_CH-1:0]                  m_axi_awvalid,
-    input  wire [AXI_CH-1:0]                  m_axi_awready,
-    output wire [AXI_CH*AXI_DATA_WIDTH-1:0]   m_axi_wdata,
-    output wire [AXI_CH*AXI_STRB_WIDTH-1:0]   m_axi_wstrb,
-    output wire [AXI_CH-1:0]                  m_axi_wlast,
-    output wire [AXI_CH-1:0]                  m_axi_wvalid,
-    input  wire [AXI_CH-1:0]                  m_axi_wready,
-    input  wire [AXI_CH*AXI_ID_WIDTH-1:0]     m_axi_bid,
-    input  wire [AXI_CH*2-1:0]                m_axi_bresp,
-    input  wire [AXI_CH-1:0]                  m_axi_bvalid,
-    output wire [AXI_CH-1:0]                  m_axi_bready,
-    output wire [AXI_CH*AXI_ID_WIDTH-1:0]     m_axi_arid,
-    output wire [AXI_CH*AXI_ADDR_WIDTH-1:0]   m_axi_araddr,
-    output wire [AXI_CH*8-1:0]                m_axi_arlen,
-    output wire [AXI_CH*3-1:0]                m_axi_arsize,
-    output wire [AXI_CH*2-1:0]                m_axi_arburst,
-    output wire [AXI_CH-1:0]                  m_axi_arlock,
-    output wire [AXI_CH*4-1:0]                m_axi_arcache,
-    output wire [AXI_CH*3-1:0]                m_axi_arprot,
-    output wire [AXI_CH-1:0]                  m_axi_arvalid,
-    input  wire [AXI_CH-1:0]                  m_axi_arready,
-    input  wire [AXI_CH*AXI_ID_WIDTH-1:0]     m_axi_rid,
-    input  wire [AXI_CH*AXI_DATA_WIDTH-1:0]   m_axi_rdata,
-    input  wire [AXI_CH*2-1:0]                m_axi_rresp,
-    input  wire [AXI_CH-1:0]                  m_axi_rlast,
-    input  wire [AXI_CH-1:0]                  m_axi_rvalid,
-    output wire [AXI_CH-1:0]                  m_axi_rready,
+    input  wire [AXI_CH-1:0]                  m_axi_clk, // 各AXI通道时钟
+    input  wire [AXI_CH-1:0]                  m_axi_rst, // 各AXI通道复位
+    output wire [AXI_CH*AXI_ID_WIDTH-1:0]     m_axi_awid, // 各通道AXI AWID
+    output wire [AXI_CH*AXI_ADDR_WIDTH-1:0]   m_axi_awaddr, // 各通道AXI AWADDR
+    output wire [AXI_CH*8-1:0]                m_axi_awlen, // 各通道AXI AWLEN
+    output wire [AXI_CH*3-1:0]                m_axi_awsize, // 各通道AXI AWSIZE
+    output wire [AXI_CH*2-1:0]                m_axi_awburst, // 各通道AXI AWBURST
+    output wire [AXI_CH-1:0]                  m_axi_awlock, // 各通道AXI AWLOCK
+    output wire [AXI_CH*4-1:0]                m_axi_awcache, // 各通道AXI AWCACHE
+    output wire [AXI_CH*3-1:0]                m_axi_awprot, // 各通道AXI AWPROT
+    output wire [AXI_CH-1:0]                  m_axi_awvalid, // 各通道AXI AWVALID
+    input  wire [AXI_CH-1:0]                  m_axi_awready, // 各通道AXI AWREADY
+    output wire [AXI_CH*AXI_DATA_WIDTH-1:0]   m_axi_wdata, // 各通道AXI WDATA
+    output wire [AXI_CH*AXI_STRB_WIDTH-1:0]   m_axi_wstrb, // 各通道AXI WSTRB
+    output wire [AXI_CH-1:0]                  m_axi_wlast, // 各通道AXI WLAST
+    output wire [AXI_CH-1:0]                  m_axi_wvalid, // 各通道AXI WVALID
+    input  wire [AXI_CH-1:0]                  m_axi_wready, // 各通道AXI WREADY
+    input  wire [AXI_CH*AXI_ID_WIDTH-1:0]     m_axi_bid, // 各通道AXI BID
+    input  wire [AXI_CH*2-1:0]                m_axi_bresp, // 各通道AXI BRESP
+    input  wire [AXI_CH-1:0]                  m_axi_bvalid, // 各通道AXI BVALID
+    output wire [AXI_CH-1:0]                  m_axi_bready, // 各通道AXI BREADY
+    output wire [AXI_CH*AXI_ID_WIDTH-1:0]     m_axi_arid, // 各通道AXI ARID
+    output wire [AXI_CH*AXI_ADDR_WIDTH-1:0]   m_axi_araddr, // 各通道AXI ARADDR
+    output wire [AXI_CH*8-1:0]                m_axi_arlen, // 各通道AXI ARLEN
+    output wire [AXI_CH*3-1:0]                m_axi_arsize, // 各通道AXI ARSIZE
+    output wire [AXI_CH*2-1:0]                m_axi_arburst, // 各通道AXI ARBURST
+    output wire [AXI_CH-1:0]                  m_axi_arlock, // 各通道AXI ARLOCK
+    output wire [AXI_CH*4-1:0]                m_axi_arcache, // 各通道AXI ARCACHE
+    output wire [AXI_CH*3-1:0]                m_axi_arprot, // 各通道AXI ARPROT
+    output wire [AXI_CH-1:0]                  m_axi_arvalid, // 各通道AXI ARVALID
+    input  wire [AXI_CH-1:0]                  m_axi_arready, // 各通道AXI ARREADY
+    input  wire [AXI_CH*AXI_ID_WIDTH-1:0]     m_axi_rid, // 各通道AXI RID
+    input  wire [AXI_CH*AXI_DATA_WIDTH-1:0]   m_axi_rdata, // 各通道AXI RDATA
+    input  wire [AXI_CH*2-1:0]                m_axi_rresp, // 各通道AXI RRESP
+    input  wire [AXI_CH-1:0]                  m_axi_rlast, // 各通道AXI RLAST
+    input  wire [AXI_CH-1:0]                  m_axi_rvalid, // 各通道AXI RVALID
+    output wire [AXI_CH-1:0]                  m_axi_rready, // 各通道AXI RREADY
 
     /*
-     * Configuration
+     * 配置
      */
-    input  wire [AXI_CH*AXI_ADDR_WIDTH-1:0]   cfg_fifo_base_addr,
-    input  wire [LEN_WIDTH-1:0]               cfg_fifo_size_mask,
-    input  wire                               cfg_enable,
-    input  wire                               cfg_reset,
+    input  wire [AXI_CH*AXI_ADDR_WIDTH-1:0]   cfg_fifo_base_addr, // 每个通道虚拟FIFO基地址
+    input  wire [LEN_WIDTH-1:0]               cfg_fifo_size_mask, // 所有通道共享的FIFO大小掩码
+    input  wire                               cfg_enable, // 全局配置使能
+    input  wire                               cfg_reset, // 全局配置复位
 
     /*
-     * Status
+     * 状态
      */
-    output wire [AXI_CH*(LEN_WIDTH+1)-1:0]    sts_fifo_occupancy,
-    output wire [AXI_CH-1:0]                  sts_fifo_empty,
-    output wire [AXI_CH-1:0]                  sts_fifo_full,
-    output wire [AXI_CH-1:0]                  sts_reset,
-    output wire [AXI_CH-1:0]                  sts_active,
-    output wire                               sts_hdr_parity_err
+    output wire [AXI_CH*(LEN_WIDTH+1)-1:0]    sts_fifo_occupancy, // 各通道FIFO占用量
+    output wire [AXI_CH-1:0]                  sts_fifo_empty, // 各通道FIFO空标志
+    output wire [AXI_CH-1:0]                  sts_fifo_full, // 各通道FIFO满标志
+    output wire [AXI_CH-1:0]                  sts_reset, // 各通道复位状态
+    output wire [AXI_CH-1:0]                  sts_active, // 各通道使能活动状态
+    output wire                               sts_hdr_parity_err // 头部奇偶校验错误状态（同步到 m_axis_clk 域）
 );
 
 parameter CH_SEG_CNT = AXI_DATA_WIDTH > MAX_SEG_WIDTH ? AXI_DATA_WIDTH / MAX_SEG_WIDTH : 1;
 parameter SEG_CNT = CH_SEG_CNT * AXI_CH;
 parameter SEG_WIDTH = AXI_DATA_WIDTH / CH_SEG_CNT;
 
-wire [AXI_CH-1:0]             ch_input_rst_out;
-wire [AXI_CH-1:0]             ch_input_watermark;
-wire [SEG_CNT*SEG_WIDTH-1:0]  ch_input_data;
-wire [SEG_CNT-1:0]            ch_input_valid;
-wire [SEG_CNT-1:0]            ch_input_ready;
+wire [AXI_CH-1:0]             ch_input_rst_out; // 各通道写侧对输入域发出的复位反馈
+wire [AXI_CH-1:0]             ch_input_watermark; // 各通道写侧输入水位告警
+wire [SEG_CNT*SEG_WIDTH-1:0]  ch_input_data; // 编码后分段输入数据总线（按通道拼接）
+wire [SEG_CNT-1:0]            ch_input_valid; // 编码后分段输入有效
+wire [SEG_CNT-1:0]            ch_input_ready; // 各通道对分段输入的就绪反馈
 
-wire [AXI_CH-1:0]             ch_output_rst_out;
-wire [SEG_CNT*SEG_WIDTH-1:0]  ch_output_data;
-wire [SEG_CNT-1:0]            ch_output_valid;
-wire [SEG_CNT-1:0]            ch_output_ready;
-wire [SEG_CNT*SEG_WIDTH-1:0]  ch_output_ctrl_data;
-wire [SEG_CNT-1:0]            ch_output_ctrl_valid;
-wire [SEG_CNT-1:0]            ch_output_ctrl_ready;
+wire [AXI_CH-1:0]             ch_output_rst_out; // 各通道读侧对输出域发出的复位反馈
+wire [SEG_CNT*SEG_WIDTH-1:0]  ch_output_data; // 各通道读出分段数据拼接总线
+wire [SEG_CNT-1:0]            ch_output_valid; // 各通道读出分段数据有效
+wire [SEG_CNT-1:0]            ch_output_ready; // 解码器对分段输出就绪
+wire [SEG_CNT*SEG_WIDTH-1:0]  ch_output_ctrl_data; // 各通道读出分段控制数据
+wire [SEG_CNT-1:0]            ch_output_ctrl_valid; // 各通道读出控制数据有效
+wire [SEG_CNT-1:0]            ch_output_ctrl_ready; // 解码器对控制数据就绪
 
-wire [AXI_CH-1:0] ch_rst_req;
+wire [AXI_CH-1:0] ch_rst_req; // 各通道复位请求总线（通道间互相可见）
 
-// config management
-reg [AXI_CH*AXI_ADDR_WIDTH-1:0] cfg_fifo_base_addr_reg = 0;
-reg [LEN_WIDTH-1:0] cfg_fifo_size_mask_reg = 0;
-reg cfg_enable_reg = 0;
-reg cfg_reset_reg = 0;
+// 配置管理
+reg [AXI_CH*AXI_ADDR_WIDTH-1:0] cfg_fifo_base_addr_reg = 0; // 锁存后的每通道FIFO基地址配置
+reg [LEN_WIDTH-1:0] cfg_fifo_size_mask_reg = 0; // 锁存后的FIFO大小掩码配置
+reg cfg_enable_reg = 0; // 全局使能锁存位（一次使能后仅复位清除）
+reg cfg_reset_reg = 0; // 全局复位锁存位（供各通道同步）
 
 always @(posedge clk) begin
     if (cfg_enable_reg) begin
@@ -219,31 +225,31 @@ always @(posedge clk) begin
     end
 end
 
-// status sync
-wire [AXI_CH*(LEN_WIDTH+1)-1:0] sts_fifo_occupancy_int;
-wire [AXI_CH-1:0] sts_fifo_empty_int;
-wire [AXI_CH-1:0] sts_fifo_full_int;
-wire [AXI_CH-1:0] sts_reset_int;
-wire [AXI_CH-1:0] sts_active_int;
-wire sts_hdr_parity_err_int;
-reg [3:0] sts_hdr_parity_err_cnt_reg = 0;
-reg sts_hdr_parity_err_reg = 1'b0;
+// 状态同步
+wire [AXI_CH*(LEN_WIDTH+1)-1:0] sts_fifo_occupancy_int; // 各通道原始占用量状态（通道时钟域采样回传）
+wire [AXI_CH-1:0] sts_fifo_empty_int; // 各通道原始空状态
+wire [AXI_CH-1:0] sts_fifo_full_int; // 各通道原始满状态
+wire [AXI_CH-1:0] sts_reset_int; // 各通道原始复位状态
+wire [AXI_CH-1:0] sts_active_int; // 各通道原始活动状态
+wire sts_hdr_parity_err_int; // 解码器头部奇偶校验错误脉冲
+reg [3:0] sts_hdr_parity_err_cnt_reg = 0; // 头部奇偶错误保持计数（拉宽脉冲便于跨域采样）
+reg sts_hdr_parity_err_reg = 1'b0; // m_axis_clk 域错误状态寄存
 
-reg [2:0] sts_sync_count_reg = 0;
-reg sts_sync_flag_reg = 1'b0;
+reg [2:0] sts_sync_count_reg = 0; // 状态采样分频计数器
+reg sts_sync_flag_reg = 1'b0; // 状态采样翻转标志（通道域检测边沿用于抓拍）
 
 (* shreg_extract = "no" *)
-reg [AXI_CH*(LEN_WIDTH+1)-1:0] sts_fifo_occupancy_sync_reg = 0;
+reg [AXI_CH*(LEN_WIDTH+1)-1:0] sts_fifo_occupancy_sync_reg = 0; // 同步到 clk 域的占用量状态寄存
 (* shreg_extract = "no" *)
-reg [AXI_CH-1:0] sts_fifo_empty_sync_1_reg = 0, sts_fifo_empty_sync_2_reg = 0;
+reg [AXI_CH-1:0] sts_fifo_empty_sync_1_reg = 0, sts_fifo_empty_sync_2_reg = 0; // 空状态双级同步寄存
 (* shreg_extract = "no" *)
-reg [AXI_CH-1:0] sts_fifo_full_sync_1_reg = 0, sts_fifo_full_sync_2_reg = 0;
+reg [AXI_CH-1:0] sts_fifo_full_sync_1_reg = 0, sts_fifo_full_sync_2_reg = 0; // 满状态双级同步寄存
 (* shreg_extract = "no" *)
-reg [AXI_CH-1:0] sts_reset_sync_1_reg = 0, sts_reset_sync_2_reg = 0;
+reg [AXI_CH-1:0] sts_reset_sync_1_reg = 0, sts_reset_sync_2_reg = 0; // 复位状态双级同步寄存
 (* shreg_extract = "no" *)
-reg [AXI_CH-1:0] sts_active_sync_1_reg = 0, sts_active_sync_2_reg = 0;
+reg [AXI_CH-1:0] sts_active_sync_1_reg = 0, sts_active_sync_2_reg = 0; // 活动状态双级同步寄存
 (* shreg_extract = "no" *)
-reg sts_hdr_parity_err_sync_1_reg = 0, sts_hdr_parity_err_sync_2_reg = 0;
+reg sts_hdr_parity_err_sync_1_reg = 0, sts_hdr_parity_err_sync_2_reg = 0; // 头部奇偶错误状态双级同步寄存
 
 assign sts_fifo_occupancy = sts_fifo_occupancy_sync_reg;
 assign sts_fifo_empty = sts_fifo_empty_sync_2_reg;
@@ -311,7 +317,7 @@ axi_vfifo_enc_inst (
     .rst(s_axis_rst),
 
     /*
-     * AXI stream data input
+     * AXI-Stream 数据输入
      */
     .s_axis_tdata(s_axis_tdata),
     .s_axis_tkeep(s_axis_tkeep),
@@ -323,7 +329,7 @@ axi_vfifo_enc_inst (
     .s_axis_tuser(s_axis_tuser),
 
     /*
-     * Segmented data output (to virtual FIFO channel)
+     * 分段数据输出（到虚拟 FIFO 通道）
      */
     .fifo_rst_in(s_axis_rst_out),
     .output_data(ch_input_data),
@@ -337,44 +343,44 @@ genvar  n;
 
 for (n = 0; n < AXI_CH; n = n + 1) begin : axi_ch
     
-    wire ch_clk = m_axi_clk[1*n +: 1];
-    wire ch_rst = m_axi_rst[1*n +: 1];
+    wire ch_clk = m_axi_clk[1*n +: 1]; // 第n个AXI通道时钟
+    wire ch_rst = m_axi_rst[1*n +: 1]; // 第n个AXI通道复位
 
-    wire [AXI_ID_WIDTH-1:0]    ch_axi_awid;
-    wire [AXI_ADDR_WIDTH-1:0]  ch_axi_awaddr;
-    wire [7:0]                 ch_axi_awlen;
-    wire [2:0]                 ch_axi_awsize;
-    wire [1:0]                 ch_axi_awburst;
-    wire                       ch_axi_awlock;
-    wire [3:0]                 ch_axi_awcache;
-    wire [2:0]                 ch_axi_awprot;
-    wire                       ch_axi_awvalid;
-    wire                       ch_axi_awready;
-    wire [AXI_DATA_WIDTH-1:0]  ch_axi_wdata;
-    wire [AXI_STRB_WIDTH-1:0]  ch_axi_wstrb;
-    wire                       ch_axi_wlast;
-    wire                       ch_axi_wvalid;
-    wire                       ch_axi_wready;
-    wire [AXI_ID_WIDTH-1:0]    ch_axi_bid;
-    wire [1:0]                 ch_axi_bresp;
-    wire                       ch_axi_bvalid;
-    wire                       ch_axi_bready;
-    wire [AXI_ID_WIDTH-1:0]    ch_axi_arid;
-    wire [AXI_ADDR_WIDTH-1:0]  ch_axi_araddr;
-    wire [7:0]                 ch_axi_arlen;
-    wire [2:0]                 ch_axi_arsize;
-    wire [1:0]                 ch_axi_arburst;
-    wire                       ch_axi_arlock;
-    wire [3:0]                 ch_axi_arcache;
-    wire [2:0]                 ch_axi_arprot;
-    wire                       ch_axi_arvalid;
-    wire                       ch_axi_arready;
-    wire [AXI_ID_WIDTH-1:0]    ch_axi_rid;
-    wire [AXI_DATA_WIDTH-1:0]  ch_axi_rdata;
-    wire [1:0]                 ch_axi_rresp;
-    wire                       ch_axi_rlast;
-    wire                       ch_axi_rvalid;
-    wire                       ch_axi_rready;
+    wire [AXI_ID_WIDTH-1:0]    ch_axi_awid; // 当前通道AWID
+    wire [AXI_ADDR_WIDTH-1:0]  ch_axi_awaddr; // 当前通道AWADDR
+    wire [7:0]                 ch_axi_awlen; // 当前通道AWLEN
+    wire [2:0]                 ch_axi_awsize; // 当前通道AWSIZE
+    wire [1:0]                 ch_axi_awburst; // 当前通道AWBURST
+    wire                       ch_axi_awlock; // 当前通道AWLOCK
+    wire [3:0]                 ch_axi_awcache; // 当前通道AWCACHE
+    wire [2:0]                 ch_axi_awprot; // 当前通道AWPROT
+    wire                       ch_axi_awvalid; // 当前通道AWVALID
+    wire                       ch_axi_awready; // 当前通道AWREADY
+    wire [AXI_DATA_WIDTH-1:0]  ch_axi_wdata; // 当前通道WDATA
+    wire [AXI_STRB_WIDTH-1:0]  ch_axi_wstrb; // 当前通道WSTRB
+    wire                       ch_axi_wlast; // 当前通道WLAST
+    wire                       ch_axi_wvalid; // 当前通道WVALID
+    wire                       ch_axi_wready; // 当前通道WREADY
+    wire [AXI_ID_WIDTH-1:0]    ch_axi_bid; // 当前通道BID
+    wire [1:0]                 ch_axi_bresp; // 当前通道BRESP
+    wire                       ch_axi_bvalid; // 当前通道BVALID
+    wire                       ch_axi_bready; // 当前通道BREADY
+    wire [AXI_ID_WIDTH-1:0]    ch_axi_arid; // 当前通道ARID
+    wire [AXI_ADDR_WIDTH-1:0]  ch_axi_araddr; // 当前通道ARADDR
+    wire [7:0]                 ch_axi_arlen; // 当前通道ARLEN
+    wire [2:0]                 ch_axi_arsize; // 当前通道ARSIZE
+    wire [1:0]                 ch_axi_arburst; // 当前通道ARBURST
+    wire                       ch_axi_arlock; // 当前通道ARLOCK
+    wire [3:0]                 ch_axi_arcache; // 当前通道ARCACHE
+    wire [2:0]                 ch_axi_arprot; // 当前通道ARPROT
+    wire                       ch_axi_arvalid; // 当前通道ARVALID
+    wire                       ch_axi_arready; // 当前通道ARREADY
+    wire [AXI_ID_WIDTH-1:0]    ch_axi_rid; // 当前通道RID
+    wire [AXI_DATA_WIDTH-1:0]  ch_axi_rdata; // 当前通道RDATA
+    wire [1:0]                 ch_axi_rresp; // 当前通道RRESP
+    wire                       ch_axi_rlast; // 当前通道RLAST
+    wire                       ch_axi_rvalid; // 当前通道RVALID
+    wire                       ch_axi_rready; // 当前通道RREADY
 
     assign m_axi_awid[AXI_ID_WIDTH*n +: AXI_ID_WIDTH] = ch_axi_awid;
     assign m_axi_awaddr[AXI_ADDR_WIDTH*n +: AXI_ADDR_WIDTH] = ch_axi_awaddr;
@@ -412,11 +418,11 @@ for (n = 0; n < AXI_CH; n = n + 1) begin : axi_ch
     assign ch_axi_rvalid = m_axi_rvalid[1*n +: 1];
     assign m_axi_rready[1*n +: 1] = ch_axi_rready;
 
-    // control sync
+    // 控制同步
     (* shreg_extract = "no" *)
-    reg ch_cfg_enable_sync_1_reg = 1'b0,  ch_cfg_enable_sync_2_reg = 1'b0;
+    reg ch_cfg_enable_sync_1_reg = 1'b0,  ch_cfg_enable_sync_2_reg = 1'b0; // cfg_enable跨到当前通道时钟域的双级同步寄存
     (* shreg_extract = "no" *)
-    reg ch_cfg_reset_sync_1_reg = 1'b0,  ch_cfg_reset_sync_2_reg = 1'b0;
+    reg ch_cfg_reset_sync_1_reg = 1'b0,  ch_cfg_reset_sync_2_reg = 1'b0; // cfg_reset跨到当前通道时钟域的双级同步寄存
 
     always @(posedge ch_clk) begin
         ch_cfg_enable_sync_1_reg <= cfg_enable_reg;
@@ -425,12 +431,12 @@ for (n = 0; n < AXI_CH; n = n + 1) begin : axi_ch
         ch_cfg_reset_sync_2_reg <= ch_cfg_reset_sync_1_reg;
     end
 
-    // status sync
-    wire [LEN_WIDTH+1-1:0] ch_sts_fifo_occupancy;
-    reg [LEN_WIDTH+1-1:0] ch_sts_fifo_occupancy_reg;
+    // 状态同步
+    wire [LEN_WIDTH+1-1:0] ch_sts_fifo_occupancy; // 当前通道原始FIFO占用量
+    reg [LEN_WIDTH+1-1:0] ch_sts_fifo_occupancy_reg; // 当前通道采样后上报到顶层的占用量寄存
 
     (* shreg_extract = "no" *)
-    reg ch_sts_flag_sync_1_reg = 1'b0,  ch_sts_flag_sync_2_reg = 1'b0,  ch_sts_flag_sync_3_reg = 1'b0;
+    reg ch_sts_flag_sync_1_reg = 1'b0,  ch_sts_flag_sync_2_reg = 1'b0,  ch_sts_flag_sync_3_reg = 1'b0; // 状态采样翻转标志跨域同步链（通道域检测边沿）
 
     assign sts_fifo_occupancy_int[(LEN_WIDTH+1)*n +: LEN_WIDTH+1] = ch_sts_fifo_occupancy_reg;
 
@@ -465,7 +471,7 @@ for (n = 0; n < AXI_CH; n = n + 1) begin : axi_ch
         .rst(ch_rst),
 
         /*
-         * Segmented data input (from encode logic)
+         * 分段数据输入（来自编码逻辑）
          */
         .input_clk(s_axis_clk),
         .input_rst(s_axis_rst),
@@ -476,7 +482,7 @@ for (n = 0; n < AXI_CH; n = n + 1) begin : axi_ch
         .input_ready(ch_input_ready[CH_SEG_CNT*n +: CH_SEG_CNT]),
 
         /*
-         * Segmented data output (to decode logic)
+         * 分段数据输出（到解码逻辑）
          */
         .output_clk(m_axis_clk),
         .output_rst(m_axis_rst),
@@ -489,7 +495,7 @@ for (n = 0; n < AXI_CH; n = n + 1) begin : axi_ch
         .output_ctrl_ready(ch_output_ctrl_ready[CH_SEG_CNT*n +: CH_SEG_CNT]),
 
         /*
-         * AXI master interface
+         * AXI 主接口
          */
         .m_axi_awid(ch_axi_awid),
         .m_axi_awaddr(ch_axi_awaddr),
@@ -528,13 +534,13 @@ for (n = 0; n < AXI_CH; n = n + 1) begin : axi_ch
         .m_axi_rready(ch_axi_rready),
 
         /*
-         * Reset sync
+         * 复位同步
          */
         .rst_req_out(ch_rst_req[n]),
         .rst_req_in(|ch_rst_req),
 
         /*
-         * Configuration
+         * 配置
          */
         .cfg_fifo_base_addr(cfg_fifo_base_addr_reg[AXI_ADDR_WIDTH*n +: AXI_ADDR_WIDTH]),
         .cfg_fifo_size_mask(cfg_fifo_size_mask_reg),
@@ -542,7 +548,7 @@ for (n = 0; n < AXI_CH; n = n + 1) begin : axi_ch
         .cfg_reset(ch_cfg_reset_sync_2_reg),
 
         /*
-         * Status
+         * 状态
          */
         .sts_fifo_occupancy(ch_sts_fifo_occupancy),
         .sts_fifo_empty(sts_fifo_empty_int[n]),
@@ -578,7 +584,7 @@ axi_vfifo_dec_inst (
     .rst(m_axis_rst),
 
     /*
-     * Segmented data input (from virtual FIFO channel)
+     * 分段数据输入（来自虚拟 FIFO 通道）
      */
     .fifo_rst_in(m_axis_rst_out),
     .input_data(ch_output_data),
@@ -589,7 +595,7 @@ axi_vfifo_dec_inst (
     .input_ctrl_ready(ch_output_ctrl_ready),
 
     /*
-     * AXI stream data output
+     * AXI-Stream 数据输出
      */
     .m_axis_tdata(m_axis_tdata),
     .m_axis_tkeep(m_axis_tkeep),
@@ -601,7 +607,7 @@ axi_vfifo_dec_inst (
     .m_axis_tuser(m_axis_tuser),
 
     /*
-     * Status
+     * 状态
      */
     .sts_hdr_parity_err(sts_hdr_parity_err_int)
 );

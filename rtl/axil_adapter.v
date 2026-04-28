@@ -22,77 +22,83 @@ THE SOFTWARE.
 
 */
 
-// Language: Verilog 2001
+// 语言: Verilog 2001
 
 `resetall
 `timescale 1ns / 1ps
 `default_nettype none
 
 /*
- * AXI4 lite width adapter
+ * AXI4-Lite 位宽适配器
+ *
+ * 模块目录
+ * 1) 对外提供一组从侧 AXI-Lite 接口和一组主侧 AXI-Lite 接口。
+ * 2) 写通道位宽转换由 `axil_adapter_wr` 子模块完成。
+ * 3) 读通道位宽转换由 `axil_adapter_rd` 子模块完成。
+ * 4) 目标：在保持 AXI-Lite 语义不变的前提下完成主从数据位宽适配。
  */
 module axil_adapter #
 (
-    // Width of address bus in bits
+    // 地址总线位宽
     parameter ADDR_WIDTH = 32,
-    // Width of input (slave) interface data bus in bits
+    // 输入（从侧）接口数据位宽
     parameter S_DATA_WIDTH = 32,
-    // Width of input (slave) interface wstrb (width of data bus in words)
+    // 输入（从侧）接口 WSTRB 位宽（按字节）
     parameter S_STRB_WIDTH = (S_DATA_WIDTH/8),
-    // Width of output (master) interface data bus in bits
+    // 输出（主侧）接口数据位宽
     parameter M_DATA_WIDTH = 32,
-    // Width of output (master) interface wstrb (width of data bus in words)
+    // 输出（主侧）接口 WSTRB 位宽（按字节）
     parameter M_STRB_WIDTH = (M_DATA_WIDTH/8)
 )
 (
-    input  wire                     clk,
-    input  wire                     rst,
+    input  wire                     clk,            // 读写适配子模块共用核心时钟。
+    input  wire                     rst,            // 同步复位，传递给读写适配子模块。
 
     /*
-     * AXI lite slave interface
+     * AXI-Lite 从接口
      */
-    input  wire [ADDR_WIDTH-1:0]    s_axil_awaddr,
-    input  wire [2:0]               s_axil_awprot,
-    input  wire                     s_axil_awvalid,
-    output wire                     s_axil_awready,
-    input  wire [S_DATA_WIDTH-1:0]  s_axil_wdata,
-    input  wire [S_STRB_WIDTH-1:0]  s_axil_wstrb,
-    input  wire                     s_axil_wvalid,
-    output wire                     s_axil_wready,
-    output wire [1:0]               s_axil_bresp,
-    output wire                     s_axil_bvalid,
-    input  wire                     s_axil_bready,
-    input  wire [ADDR_WIDTH-1:0]    s_axil_araddr,
-    input  wire [2:0]               s_axil_arprot,
-    input  wire                     s_axil_arvalid,
-    output wire                     s_axil_arready,
-    output wire [S_DATA_WIDTH-1:0]  s_axil_rdata,
-    output wire [1:0]               s_axil_rresp,
-    output wire                     s_axil_rvalid,
-    input  wire                     s_axil_rready,
+    input  wire [ADDR_WIDTH-1:0]    s_axil_awaddr,  // 从侧 AW 地址（位宽转换前）。
+    input  wire [2:0]               s_axil_awprot,  // 从侧 AW 保护属性。
+    input  wire                     s_axil_awvalid, // 从侧 AW 有效。
+    output wire                     s_axil_awready, // 从侧 AW 就绪（来自写适配器）。
+    input  wire [S_DATA_WIDTH-1:0]  s_axil_wdata,   // 从侧 W 数据（从侧位宽）。
+    input  wire [S_STRB_WIDTH-1:0]  s_axil_wstrb,   // 从侧 W 字节使能（从侧位宽）。
+    input  wire                     s_axil_wvalid,  // 从侧 W 有效。
+    output wire                     s_axil_wready,  // 从侧 W 就绪（来自写适配器）。
+    output wire [1:0]               s_axil_bresp,   // 从侧 B 响应（写转换后返回）。
+    output wire                     s_axil_bvalid,  // 从侧 B 有效（写转换后返回）。
+    input  wire                     s_axil_bready,  // 从侧 B 就绪。
+    input  wire [ADDR_WIDTH-1:0]    s_axil_araddr,  // 从侧 AR 地址（位宽转换前）。
+    input  wire [2:0]               s_axil_arprot,  // 从侧 AR 保护属性。
+    input  wire                     s_axil_arvalid, // 从侧 AR 有效。
+    output wire                     s_axil_arready, // 从侧 AR 就绪（来自读适配器）。
+    output wire [S_DATA_WIDTH-1:0]  s_axil_rdata,   // 从侧 R 数据（从侧位宽）。
+    output wire [1:0]               s_axil_rresp,   // 从侧 R 响应（来自读适配器）。
+    output wire                     s_axil_rvalid,  // 从侧 R 有效（来自读适配器）。
+    input  wire                     s_axil_rready,  // 从侧 R 就绪。
 
     /*
-     * AXI lite master interface
+     * AXI-Lite 主接口
      */
-    output wire [ADDR_WIDTH-1:0]    m_axil_awaddr,
-    output wire [2:0]               m_axil_awprot,
-    output wire                     m_axil_awvalid,
-    input  wire                     m_axil_awready,
-    output wire [M_DATA_WIDTH-1:0]  m_axil_wdata,
-    output wire [M_STRB_WIDTH-1:0]  m_axil_wstrb,
-    output wire                     m_axil_wvalid,
-    input  wire                     m_axil_wready,
-    input  wire [1:0]               m_axil_bresp,
-    input  wire                     m_axil_bvalid,
-    output wire                     m_axil_bready,
-    output wire [ADDR_WIDTH-1:0]    m_axil_araddr,
-    output wire [2:0]               m_axil_arprot,
-    output wire                     m_axil_arvalid,
-    input  wire                     m_axil_arready,
-    input  wire [M_DATA_WIDTH-1:0]  m_axil_rdata,
-    input  wire [1:0]               m_axil_rresp,
-    input  wire                     m_axil_rvalid,
-    output wire                     m_axil_rready
+    output wire [ADDR_WIDTH-1:0]    m_axil_awaddr,  // 主侧 AW 地址（指向下游目标）。
+    output wire [2:0]               m_axil_awprot,  // 主侧 AW 保护属性。
+    output wire                     m_axil_awvalid, // 主侧 AW 有效（来自写适配器）。
+    input  wire                     m_axil_awready, // 主侧 AW 就绪（来自下游目标）。
+    output wire [M_DATA_WIDTH-1:0]  m_axil_wdata,   // 主侧 W 数据（主侧位宽）。
+    output wire [M_STRB_WIDTH-1:0]  m_axil_wstrb,   // 主侧 W 字节使能（主侧位宽）。
+    output wire                     m_axil_wvalid,  // 主侧 W 有效（来自写适配器）。
+    input  wire                     m_axil_wready,  // 主侧 W 就绪（来自下游目标）。
+    input  wire [1:0]               m_axil_bresp,   // 主侧 B 响应（来自下游目标）。
+    input  wire                     m_axil_bvalid,  // 主侧 B 有效（来自下游目标）。
+    output wire                     m_axil_bready,  // 主侧 B 就绪（来自写适配器）。
+    output wire [ADDR_WIDTH-1:0]    m_axil_araddr,  // 主侧 AR 地址（指向下游目标）。
+    output wire [2:0]               m_axil_arprot,  // 主侧 AR 保护属性。
+    output wire                     m_axil_arvalid, // 主侧 AR 有效（来自读适配器）。
+    input  wire                     m_axil_arready, // 主侧 AR 就绪（来自下游目标）。
+    input  wire [M_DATA_WIDTH-1:0]  m_axil_rdata,   // 主侧 R 数据（来自下游目标）。
+    input  wire [1:0]               m_axil_rresp,   // 主侧 R 响应（来自下游目标）。
+    input  wire                     m_axil_rvalid,  // 主侧 R 有效（来自下游目标）。
+    output wire                     m_axil_rready   // 主侧 R 就绪（来自读适配器）。
 );
 
 axil_adapter_wr #(
@@ -107,7 +113,7 @@ axil_adapter_wr_inst (
     .rst(rst),
 
     /*
-     * AXI lite slave interface
+     * AXI-Lite 从接口
      */
     .s_axil_awaddr(s_axil_awaddr),
     .s_axil_awprot(s_axil_awprot),
@@ -122,7 +128,7 @@ axil_adapter_wr_inst (
     .s_axil_bready(s_axil_bready),
 
     /*
-     * AXI lite master interface
+     * AXI-Lite 主接口
      */
     .m_axil_awaddr(m_axil_awaddr),
     .m_axil_awprot(m_axil_awprot),
@@ -149,7 +155,7 @@ axil_adapter_rd_inst (
     .rst(rst),
 
     /*
-     * AXI lite slave interface
+     * AXI-Lite 从接口
      */
     .s_axil_araddr(s_axil_araddr),
     .s_axil_arprot(s_axil_arprot),
@@ -161,7 +167,7 @@ axil_adapter_rd_inst (
     .s_axil_rready(s_axil_rready),
 
     /*
-     * AXI lite master interface
+     * AXI-Lite 主接口
      */
     .m_axil_araddr(m_axil_araddr),
     .m_axil_arprot(m_axil_arprot),

@@ -22,95 +22,101 @@ THE SOFTWARE.
 
 */
 
-// Language: Verilog 2001
+// 语言: Verilog 2001
 
 `resetall
 `timescale 1ns / 1ps
 `default_nettype none
 
 /*
- * AXI4 width adapter
+ * AXI4 位宽适配器（读通道）
+ *
+ * 模块目录
+ * 1) 在从端接收 AXI 读突发请求。
+ * 2) 将突发形态/位宽转换为主端 AXI 读突发。
+ * 3) 将返回数据按从端拍宽做重组或拆分。
+ * 4) 最终 R 通道经过输出 skid buffer 级。
  */
 module axi_adapter_rd #
 (
-    // Width of address bus in bits
+    // 地址总线位宽
     parameter ADDR_WIDTH = 32,
-    // Width of input (slave) interface data bus in bits
+    // 输入侧（从接口）数据总线位宽
     parameter S_DATA_WIDTH = 32,
-    // Width of input (slave) interface wstrb (width of data bus in words)
+    // 输入侧（从接口）WSTRB 位宽（按字节 lane）
     parameter S_STRB_WIDTH = (S_DATA_WIDTH/8),
-    // Width of output (master) interface data bus in bits
+    // 输出侧（主接口）数据总线位宽
     parameter M_DATA_WIDTH = 32,
-    // Width of output (master) interface wstrb (width of data bus in words)
+    // 输出侧（主接口）WSTRB 位宽（按字节 lane）
     parameter M_STRB_WIDTH = (M_DATA_WIDTH/8),
-    // Width of ID signal
+    // ID 信号位宽
     parameter ID_WIDTH = 8,
-    // Propagate aruser signal
+    // 是否透传 aruser 信号
     parameter ARUSER_ENABLE = 0,
-    // Width of aruser signal
+    // aruser 信号位宽
     parameter ARUSER_WIDTH = 1,
-    // Propagate ruser signal
+    // 是否透传 ruser 信号
     parameter RUSER_ENABLE = 0,
-    // Width of ruser signal
+    // ruser 信号位宽
     parameter RUSER_WIDTH = 1,
-    // When adapting to a wider bus, re-pack full-width burst instead of passing through narrow burst if possible
+    // 向更宽总线适配时，尽可能重打包为满宽突发，而不是透传窄突发
     parameter CONVERT_BURST = 1,
-    // When adapting to a wider bus, re-pack all bursts instead of passing through narrow burst if possible
+    // 向更宽总线适配时，对所有突发执行重打包，而不是透传窄突发
     parameter CONVERT_NARROW_BURST = 0,
-    // Forward ID through adapter
+    // 是否在适配器中透传 ID
     parameter FORWARD_ID = 0
 )
 (
-    input  wire                     clk,
-    input  wire                     rst,
+    input  wire                     clk, // 读位宽适配器时钟。
+    input  wire                     rst, // 转换 FSM 与输出数据通路寄存器同步复位。
 
     /*
-     * AXI slave interface
+     * AXI 从接口
      */
-    input  wire [ID_WIDTH-1:0]      s_axi_arid,
-    input  wire [ADDR_WIDTH-1:0]    s_axi_araddr,
-    input  wire [7:0]               s_axi_arlen,
-    input  wire [2:0]               s_axi_arsize,
-    input  wire [1:0]               s_axi_arburst,
-    input  wire                     s_axi_arlock,
-    input  wire [3:0]               s_axi_arcache,
-    input  wire [2:0]               s_axi_arprot,
-    input  wire [3:0]               s_axi_arqos,
-    input  wire [3:0]               s_axi_arregion,
-    input  wire [ARUSER_WIDTH-1:0]  s_axi_aruser,
-    input  wire                     s_axi_arvalid,
-    output wire                     s_axi_arready,
-    output wire [ID_WIDTH-1:0]      s_axi_rid,
-    output wire [S_DATA_WIDTH-1:0]  s_axi_rdata,
-    output wire [1:0]               s_axi_rresp,
-    output wire                     s_axi_rlast,
-    output wire [RUSER_WIDTH-1:0]   s_axi_ruser,
-    output wire                     s_axi_rvalid,
-    input  wire                     s_axi_rready,
+    input  wire [ID_WIDTH-1:0]      s_axi_arid, // 从端 AR ID（读地址通道标识）。
+    input  wire [ADDR_WIDTH-1:0]    s_axi_araddr, // 从端 AR 地址。
+    input  wire [7:0]               s_axi_arlen, // 从端 AR 突发长度。
+    input  wire [2:0]               s_axi_arsize, // 从端 AR 突发尺寸。
+    input  wire [1:0]               s_axi_arburst, // 从端 AR 突发类型。
+    input  wire                     s_axi_arlock, // 从端 AR 锁属性。
+    input  wire [3:0]               s_axi_arcache, // 从端 AR cache 属性。
+    input  wire [2:0]               s_axi_arprot, // 从端 AR 保护属性。
+    input  wire [3:0]               s_axi_arqos, // 从端 AR QoS（服务质量字段）。
+    input  wire [3:0]               s_axi_arregion, // 从端 AR region（区域属性字段）。
+    input  wire [ARUSER_WIDTH-1:0]  s_axi_aruser, // 从端 AR 用户旁带。
+    input  wire                     s_axi_arvalid, // 从端 ARVALID（读地址有效）。
+    output wire                     s_axi_arready, // 从端 ARREADY（读地址就绪）。
+    output wire [ID_WIDTH-1:0]      s_axi_rid, // 从端 R ID（读数据通道标识）。
+    output wire [S_DATA_WIDTH-1:0]  s_axi_rdata, // 从端 R 数据（源位宽）。
+    output wire [1:0]               s_axi_rresp, // 从端 R 响应码。
+    output wire                     s_axi_rlast, // 从端 RLAST（读突发最后一拍）。
+    output wire [RUSER_WIDTH-1:0]   s_axi_ruser, // 从端 R 用户旁带。
+    output wire                     s_axi_rvalid, // 从端 RVALID（读数据有效）。
+    input  wire                     s_axi_rready, // 从端 RREADY（读数据就绪）。
 
     /*
-     * AXI master interface
+     * AXI 主接口
      */
-    output wire [ID_WIDTH-1:0]      m_axi_arid,
-    output wire [ADDR_WIDTH-1:0]    m_axi_araddr,
-    output wire [7:0]               m_axi_arlen,
-    output wire [2:0]               m_axi_arsize,
-    output wire [1:0]               m_axi_arburst,
-    output wire                     m_axi_arlock,
-    output wire [3:0]               m_axi_arcache,
-    output wire [2:0]               m_axi_arprot,
-    output wire [3:0]               m_axi_arqos,
-    output wire [3:0]               m_axi_arregion,
-    output wire [ARUSER_WIDTH-1:0]  m_axi_aruser,
-    output wire                     m_axi_arvalid,
-    input  wire                     m_axi_arready,
-    input  wire [ID_WIDTH-1:0]      m_axi_rid,
-    input  wire [M_DATA_WIDTH-1:0]  m_axi_rdata,
-    input  wire [1:0]               m_axi_rresp,
-    input  wire                     m_axi_rlast,
-    input  wire [RUSER_WIDTH-1:0]   m_axi_ruser,
-    input  wire                     m_axi_rvalid,
-    output wire                     m_axi_rready
+    output wire [ID_WIDTH-1:0]      m_axi_arid, // 主端 AR ID。
+    output wire [ADDR_WIDTH-1:0]    m_axi_araddr, // 主端 AR 地址。
+    output wire [7:0]               m_axi_arlen, // 主端 AR 突发长度。
+    output wire [2:0]               m_axi_arsize, // 主端 AR 突发尺寸。
+    output wire [1:0]               m_axi_arburst, // 主端 AR 突发类型。
+    output wire                     m_axi_arlock, // 主端 AR 锁属性。
+    output wire [3:0]               m_axi_arcache, // 主端 AR cache 属性。
+    output wire [2:0]               m_axi_arprot, // 主端 AR 保护属性。
+    output wire [3:0]               m_axi_arqos, // 主端 AR QoS。
+    output wire [3:0]               m_axi_arregion, // 主端 AR region。
+    output wire [ARUSER_WIDTH-1:0]  m_axi_aruser, // 主端 AR 用户旁带。
+    output wire                     m_axi_arvalid, // 主端 ARVALID。
+    input  wire                     m_axi_arready, // 主端 ARREADY。
+    input  wire [ID_WIDTH-1:0]      m_axi_rid, // 主端 R ID。
+    input  wire [M_DATA_WIDTH-1:0]  m_axi_rdata, // 主端 R 数据（目标位宽）。
+    input  wire [1:0]               m_axi_rresp, // 主端 R 响应码。
+    input  wire                     m_axi_rlast, // 主端 RLAST。
+    input  wire [RUSER_WIDTH-1:0]   m_axi_ruser, // 主端 R 用户旁带。
+    input  wire                     m_axi_rvalid, // 主端 RVALID。
+    output wire                     m_axi_rready // 主端 RREADY。
 );
 
 parameter S_ADDR_BIT_OFFSET = $clog2(S_STRB_WIDTH);
@@ -122,17 +128,17 @@ parameter M_WORD_SIZE = M_DATA_WIDTH/M_WORD_WIDTH;
 parameter S_BURST_SIZE = $clog2(S_STRB_WIDTH);
 parameter M_BURST_SIZE = $clog2(M_STRB_WIDTH);
 
-// output bus is wider
+// 输出总线更宽
 parameter EXPAND = M_STRB_WIDTH > S_STRB_WIDTH;
 parameter DATA_WIDTH = EXPAND ? M_DATA_WIDTH : S_DATA_WIDTH;
 parameter STRB_WIDTH = EXPAND ? M_STRB_WIDTH : S_STRB_WIDTH;
-// required number of segments in wider bus
+// 宽总线中所需分段数量
 parameter SEGMENT_COUNT = EXPAND ? (M_STRB_WIDTH / S_STRB_WIDTH) : (S_STRB_WIDTH / M_STRB_WIDTH);
-// data width and keep width per segment
+// 每个分段的数据位宽与 keep 位宽
 parameter SEGMENT_DATA_WIDTH = DATA_WIDTH / SEGMENT_COUNT;
 parameter SEGMENT_STRB_WIDTH = STRB_WIDTH / SEGMENT_COUNT;
 
-// bus width assertions
+// 总线位宽断言检查
 initial begin
     if (S_WORD_SIZE * S_STRB_WIDTH != S_DATA_WIDTH) begin
         $error("Error: AXI slave interface data width not evenly divisble (instance %m)");
@@ -161,48 +167,48 @@ initial begin
 end
 
 localparam [1:0]
-    STATE_IDLE = 2'd0,
-    STATE_DATA = 2'd1,
-    STATE_DATA_READ = 2'd2,
-    STATE_DATA_SPLIT = 2'd3;
+    STATE_IDLE = 2'd0, // 等待新的从端 AR 请求。
+    STATE_DATA = 2'd1, // 等宽或窄突发透传场景下直接传输。
+    STATE_DATA_READ = 2'd2, // 先获取更宽主端读数据拍，再按从端位宽拆分。
+    STATE_DATA_SPLIT = 2'd3; // 仅输出缓存拆分段，不再发起新主端读取。
 
-reg [1:0] state_reg = STATE_IDLE, state_next;
+reg [1:0] state_reg = STATE_IDLE, state_next; // 主读转换 FSM 状态。
 
-reg [ID_WIDTH-1:0] id_reg = {ID_WIDTH{1'b0}}, id_next;
-reg [ADDR_WIDTH-1:0] addr_reg = {ADDR_WIDTH{1'b0}}, addr_next;
-reg [DATA_WIDTH-1:0] data_reg = {DATA_WIDTH{1'b0}}, data_next;
-reg [1:0] resp_reg = 2'd0, resp_next;
-reg [RUSER_WIDTH-1:0] ruser_reg = {RUSER_WIDTH{1'b0}}, ruser_next;
-reg [7:0] burst_reg = 8'd0, burst_next;
-reg [2:0] burst_size_reg = 3'd0, burst_size_next;
-reg [7:0] master_burst_reg = 8'd0, master_burst_next;
-reg [2:0] master_burst_size_reg = 3'd0, master_burst_size_next;
+reg [ID_WIDTH-1:0] id_reg = {ID_WIDTH{1'b0}}, id_next; // 当前从端突发锁存事务 ID。
+reg [ADDR_WIDTH-1:0] addr_reg = {ADDR_WIDTH{1'b0}}, addr_next; // 当前地址指针。
+reg [DATA_WIDTH-1:0] data_reg = {DATA_WIDTH{1'b0}}, data_next; // 缓存的合并/拆分读数据。
+reg [1:0] resp_reg = 2'd0, resp_next; // 合并数据拍的累计响应状态。
+reg [RUSER_WIDTH-1:0] ruser_reg = {RUSER_WIDTH{1'b0}}, ruser_next; // 合并数据拍的缓存 RUSER。
+reg [7:0] burst_reg = 8'd0, burst_next; // 剩余从端数据拍计数。
+reg [2:0] burst_size_reg = 3'd0, burst_size_next; // 从端突发尺寸（log2 bytes/beat）。
+reg [7:0] master_burst_reg = 8'd0, master_burst_next; // 当前子突发剩余主端数据拍计数。
+reg [2:0] master_burst_size_reg = 3'd0, master_burst_size_next; // 主端有效突发尺寸。
 
-reg s_axi_arready_reg = 1'b0, s_axi_arready_next;
+reg s_axi_arready_reg = 1'b0, s_axi_arready_next; // 从端 ARREADY 状态。
 
-reg [ID_WIDTH-1:0] m_axi_arid_reg = {ID_WIDTH{1'b0}}, m_axi_arid_next;
-reg [ADDR_WIDTH-1:0] m_axi_araddr_reg = {ADDR_WIDTH{1'b0}}, m_axi_araddr_next;
-reg [7:0] m_axi_arlen_reg = 8'd0, m_axi_arlen_next;
-reg [2:0] m_axi_arsize_reg = 3'd0, m_axi_arsize_next;
-reg [1:0] m_axi_arburst_reg = 2'd0, m_axi_arburst_next;
-reg m_axi_arlock_reg = 1'b0, m_axi_arlock_next;
-reg [3:0] m_axi_arcache_reg = 4'd0, m_axi_arcache_next;
-reg [2:0] m_axi_arprot_reg = 3'd0, m_axi_arprot_next;
-reg [3:0] m_axi_arqos_reg = 4'd0, m_axi_arqos_next;
-reg [3:0] m_axi_arregion_reg = 4'd0, m_axi_arregion_next;
-reg [ARUSER_WIDTH-1:0] m_axi_aruser_reg = {ARUSER_WIDTH{1'b0}}, m_axi_aruser_next;
-reg m_axi_arvalid_reg = 1'b0, m_axi_arvalid_next;
-reg m_axi_rready_reg = 1'b0, m_axi_rready_next;
+reg [ID_WIDTH-1:0] m_axi_arid_reg = {ID_WIDTH{1'b0}}, m_axi_arid_next; // 主端 ARID 输出寄存器。
+reg [ADDR_WIDTH-1:0] m_axi_araddr_reg = {ADDR_WIDTH{1'b0}}, m_axi_araddr_next; // 主端 ARADDR 输出寄存器。
+reg [7:0] m_axi_arlen_reg = 8'd0, m_axi_arlen_next; // 主端 ARLEN 输出寄存器。
+reg [2:0] m_axi_arsize_reg = 3'd0, m_axi_arsize_next; // 主端 ARSIZE 输出寄存器。
+reg [1:0] m_axi_arburst_reg = 2'd0, m_axi_arburst_next; // 主端 ARBURST 输出寄存器。
+reg m_axi_arlock_reg = 1'b0, m_axi_arlock_next; // 主端 ARLOCK 输出寄存器。
+reg [3:0] m_axi_arcache_reg = 4'd0, m_axi_arcache_next; // 主端 ARCACHE 输出寄存器。
+reg [2:0] m_axi_arprot_reg = 3'd0, m_axi_arprot_next; // 主端 ARPROT 输出寄存器。
+reg [3:0] m_axi_arqos_reg = 4'd0, m_axi_arqos_next; // 主端 ARQOS 输出寄存器。
+reg [3:0] m_axi_arregion_reg = 4'd0, m_axi_arregion_next; // 主端 ARREGION 输出寄存器。
+reg [ARUSER_WIDTH-1:0] m_axi_aruser_reg = {ARUSER_WIDTH{1'b0}}, m_axi_aruser_next; // 主端 ARUSER 输出寄存器。
+reg m_axi_arvalid_reg = 1'b0, m_axi_arvalid_next; // 主端 ARVALID 状态。
+reg m_axi_rready_reg = 1'b0, m_axi_rready_next; // 主端 RREADY 状态。
 
-// internal datapath
-reg  [ID_WIDTH-1:0]     s_axi_rid_int;
-reg  [S_DATA_WIDTH-1:0] s_axi_rdata_int;
-reg  [1:0]              s_axi_rresp_int;
-reg                     s_axi_rlast_int;
-reg  [RUSER_WIDTH-1:0]  s_axi_ruser_int;
-reg                     s_axi_rvalid_int;
-reg                     s_axi_rready_int_reg = 1'b0;
-wire                    s_axi_rready_int_early;
+// 内部数据通路
+reg  [ID_WIDTH-1:0]     s_axi_rid_int; // 来自转换 FSM 的内部预缓冲 RID。
+reg  [S_DATA_WIDTH-1:0] s_axi_rdata_int; // 来自转换 FSM 的内部预缓冲 RDATA。
+reg  [1:0]              s_axi_rresp_int; // 来自转换 FSM 的内部预缓冲 RRESP。
+reg                     s_axi_rlast_int; // 来自转换 FSM 的内部预缓冲 RLAST。
+reg  [RUSER_WIDTH-1:0]  s_axi_ruser_int; // 来自转换 FSM 的内部预缓冲 RUSER。
+reg                     s_axi_rvalid_int; // 来自转换 FSM 的内部预缓冲 RVALID。
+reg                     s_axi_rready_int_reg = 1'b0; // 内部到输出 skid 级的 ready 寄存器。
+wire                    s_axi_rready_int_early; // 内部到输出 skid 级的前瞻 ready。
 
 assign s_axi_arready = s_axi_arready_reg;
 
@@ -249,7 +255,7 @@ always @* begin
     m_axi_rready_next = 1'b0;
 
     if (SEGMENT_COUNT == 1) begin
-        // master output is same width; direct transfer with no splitting/merging
+        // 主端与从端位宽相同：直接传输，不做拆分/合并
         s_axi_rid_int = id_reg;
         s_axi_rdata_int = m_axi_rdata;
         s_axi_rresp_int = m_axi_rresp;
@@ -259,7 +265,7 @@ always @* begin
 
         case (state_reg)
             STATE_IDLE: begin
-                // idle state; wait for new burst
+                // 空闲态：等待新突发
                 s_axi_arready_next = !m_axi_arvalid;
 
                 if (s_axi_arready && s_axi_arvalid) begin
@@ -284,7 +290,7 @@ always @* begin
                 end
             end
             STATE_DATA: begin
-                // data state; transfer read data
+                // 数据态：传输读数据
                 m_axi_rready_next = s_axi_rready_int_early;
 
                 if (m_axi_rready && m_axi_rvalid) begin
@@ -295,7 +301,7 @@ always @* begin
                     s_axi_ruser_int = m_axi_ruser;
                     s_axi_rvalid_int = 1'b1;
                     if (m_axi_rlast) begin
-                        // last data word, return to idle
+                        // 最后一拍数据，返回空闲态
                         m_axi_rready_next = 1'b0;
                         s_axi_arready_next = !m_axi_arvalid;
                         state_next = STATE_IDLE;
@@ -308,7 +314,7 @@ always @* begin
             end
         endcase
     end else if (EXPAND) begin
-        // master output is wider; split reads
+        // 主端输出更宽：执行读数据拆分
         s_axi_rid_int = id_reg;
         s_axi_rdata_int = m_axi_rdata;
         s_axi_rresp_int = m_axi_rresp;
@@ -318,7 +324,7 @@ always @* begin
 
         case (state_reg)
             STATE_IDLE: begin
-                // idle state; wait for new burst
+                // 空闲态：等待新突发
                 s_axi_arready_next = !m_axi_arvalid;
 
                 if (s_axi_arready && s_axi_arvalid) begin
@@ -330,8 +336,8 @@ always @* begin
                     burst_next = s_axi_arlen;
                     burst_size_next = s_axi_arsize;
                     if (CONVERT_BURST && s_axi_arcache[1] && (CONVERT_NARROW_BURST || s_axi_arsize == S_BURST_SIZE)) begin
-                        // split reads
-                        // require CONVERT_BURST and arcache[1] set
+                        // 拆分读取
+                        // 需开启 CONVERT_BURST 且 arcache[1] 置位
                         master_burst_size_next = M_BURST_SIZE;
                         if (CONVERT_NARROW_BURST) begin
                             m_axi_arlen_next = (({{S_ADDR_BIT_OFFSET+1{1'b0}}, s_axi_arlen} << s_axi_arsize) + s_axi_araddr[M_ADDR_BIT_OFFSET-1:0]) >> M_BURST_SIZE;
@@ -341,7 +347,7 @@ always @* begin
                         m_axi_arsize_next = M_BURST_SIZE;
                         state_next = STATE_DATA_READ;
                     end else begin
-                        // output narrow burst
+                        // 输出窄突发
                         master_burst_size_next = s_axi_arsize;
                         m_axi_arlen_next = s_axi_arlen;
                         m_axi_arsize_next = s_axi_arsize;
@@ -440,7 +446,7 @@ always @* begin
             end
         endcase
     end else begin
-        // master output is narrower; merge reads and possibly split burst
+        // 主端输出更窄：执行读数据合并，并可能拆分突发
         s_axi_rid_int = id_reg;
         s_axi_rdata_int = data_reg;
         s_axi_rresp_int = resp_reg;
@@ -450,7 +456,7 @@ always @* begin
 
         case (state_reg)
             STATE_IDLE: begin
-                // idle state; wait for new burst
+                // 空闲态：等待新突发
                 s_axi_arready_next = !m_axi_arvalid;
 
                 resp_next = 2'd0;
@@ -464,9 +470,9 @@ always @* begin
                     burst_next = s_axi_arlen;
                     burst_size_next = s_axi_arsize;
                     if (s_axi_arsize > M_BURST_SIZE) begin
-                        // need to adjust burst size
+                        // 需要调整突发尺寸
                         if (s_axi_arlen >> (8+M_BURST_SIZE-s_axi_arsize) != 0) begin
-                            // limit burst length to max
+                            // 将突发长度限制到最大值
                             master_burst_next = (8'd255 << (s_axi_arsize-M_BURST_SIZE)) | ((~s_axi_araddr & (8'hff >> (8-s_axi_arsize))) >> M_BURST_SIZE);
                         end else begin
                             master_burst_next = (s_axi_arlen << (s_axi_arsize-M_BURST_SIZE)) | ((~s_axi_araddr & (8'hff >> (8-s_axi_arsize))) >> M_BURST_SIZE);
@@ -475,7 +481,7 @@ always @* begin
                         m_axi_arlen_next = master_burst_next;
                         m_axi_arsize_next = master_burst_size_next;
                     end else begin
-                        // pass through narrow (enough) burst
+                        // 直接透传足够窄的突发
                         master_burst_next = s_axi_arlen;
                         master_burst_size_next = s_axi_arsize;
                         m_axi_arlen_next = s_axi_arlen;
@@ -519,7 +525,7 @@ always @* begin
                     end
                     if (master_burst_reg == 0) begin
                         if (burst_next >> (8+M_BURST_SIZE-burst_size_reg) != 0) begin
-                            // limit burst length to max
+                            // 将突发长度限制到最大值
                             master_burst_next = 8'd255;
                         end else begin
                             master_burst_next = (burst_next << (burst_size_reg-M_BURST_SIZE)) | (8'hff >> (8-burst_size_reg) >> M_BURST_SIZE);
@@ -533,7 +539,7 @@ always @* begin
                             s_axi_arready_next = !m_axi_arvalid;
                             state_next = STATE_IDLE;
                         end else begin
-                            // start new burst
+                            // 启动新子突发
                             m_axi_arvalid_next = 1'b1;
                             m_axi_rready_next = 1'b0;
                             state_next = STATE_DATA;
@@ -588,25 +594,25 @@ always @(posedge clk) begin
     end
 end
 
-// output datapath logic
-reg [ID_WIDTH-1:0]     s_axi_rid_reg    = {ID_WIDTH{1'b0}};
-reg [S_DATA_WIDTH-1:0] s_axi_rdata_reg  = {S_DATA_WIDTH{1'b0}};
-reg [1:0]              s_axi_rresp_reg  = 2'd0;
-reg                    s_axi_rlast_reg  = 1'b0;
-reg [RUSER_WIDTH-1:0]  s_axi_ruser_reg  = 1'b0;
-reg                    s_axi_rvalid_reg = 1'b0, s_axi_rvalid_next;
+// 输出数据通路逻辑
+reg [ID_WIDTH-1:0]     s_axi_rid_reg    = {ID_WIDTH{1'b0}}; // 最终输出 RID 寄存器（经过 skid 级）。
+reg [S_DATA_WIDTH-1:0] s_axi_rdata_reg  = {S_DATA_WIDTH{1'b0}}; // 最终输出 RDATA 寄存器。
+reg [1:0]              s_axi_rresp_reg  = 2'd0; // 最终输出 RRESP 寄存器。
+reg                    s_axi_rlast_reg  = 1'b0; // 最终输出 RLAST 寄存器。
+reg [RUSER_WIDTH-1:0]  s_axi_ruser_reg  = 1'b0; // 最终输出 RUSER 寄存器。
+reg                    s_axi_rvalid_reg = 1'b0, s_axi_rvalid_next; // 最终输出 RVALID 当前/下一状态。
 
-reg [ID_WIDTH-1:0]     temp_s_axi_rid_reg    = {ID_WIDTH{1'b0}};
-reg [S_DATA_WIDTH-1:0] temp_s_axi_rdata_reg  = {S_DATA_WIDTH{1'b0}};
-reg [1:0]              temp_s_axi_rresp_reg  = 2'd0;
-reg                    temp_s_axi_rlast_reg  = 1'b0;
-reg [RUSER_WIDTH-1:0]  temp_s_axi_ruser_reg  = 1'b0;
-reg                    temp_s_axi_rvalid_reg = 1'b0, temp_s_axi_rvalid_next;
+reg [ID_WIDTH-1:0]     temp_s_axi_rid_reg    = {ID_WIDTH{1'b0}}; // 最终输出阻塞时的临时 RID。
+reg [S_DATA_WIDTH-1:0] temp_s_axi_rdata_reg  = {S_DATA_WIDTH{1'b0}}; // 临时 RDATA。
+reg [1:0]              temp_s_axi_rresp_reg  = 2'd0; // 临时 RRESP。
+reg                    temp_s_axi_rlast_reg  = 1'b0; // 临时 RLAST。
+reg [RUSER_WIDTH-1:0]  temp_s_axi_ruser_reg  = 1'b0; // 临时 RUSER。
+reg                    temp_s_axi_rvalid_reg = 1'b0, temp_s_axi_rvalid_next; // 临时 RVALID 当前/下一状态。
 
-// datapath control
-reg store_axi_r_int_to_output;
-reg store_axi_r_int_to_temp;
-reg store_axi_r_temp_to_output;
+// 数据通路控制
+reg store_axi_r_int_to_output; // 脉冲：将内部 R 拍写入最终输出寄存器。
+reg store_axi_r_int_to_temp; // 脉冲：将内部 R 拍写入临时寄存器。
+reg store_axi_r_temp_to_output; // 脉冲：将临时 R 拍提升到最终输出寄存器。
 
 assign s_axi_rid    = s_axi_rid_reg;
 assign s_axi_rdata  = s_axi_rdata_reg;
@@ -615,11 +621,11 @@ assign s_axi_rlast  = s_axi_rlast_reg;
 assign s_axi_ruser  = RUSER_ENABLE ? s_axi_ruser_reg : {RUSER_WIDTH{1'b0}};
 assign s_axi_rvalid = s_axi_rvalid_reg;
 
-// enable ready input next cycle if output is ready or the temp reg will not be filled on the next cycle (output reg empty or no input)
+// 若输出就绪，或下一拍临时寄存器不会被写满（输出寄存器空/无输入），则下一拍拉高 ready
 assign s_axi_rready_int_early = s_axi_rready | (~temp_s_axi_rvalid_reg & (~s_axi_rvalid_reg | ~s_axi_rvalid_int));
 
 always @* begin
-    // transfer sink ready state to source
+    // 将接收端 ready 状态传递到发送端
     s_axi_rvalid_next = s_axi_rvalid_reg;
     temp_s_axi_rvalid_next = temp_s_axi_rvalid_reg;
 
@@ -628,18 +634,18 @@ always @* begin
     store_axi_r_temp_to_output = 1'b0;
 
     if (s_axi_rready_int_reg) begin
-        // input is ready
+        // 输入端当前就绪
         if (s_axi_rready | ~s_axi_rvalid_reg) begin
-            // output is ready or currently not valid, transfer data to output
+            // 输出端就绪或当前无效，直接把数据写入输出寄存器
             s_axi_rvalid_next = s_axi_rvalid_int;
             store_axi_r_int_to_output = 1'b1;
         end else begin
-            // output is not ready, store input in temp
+            // 输出端未就绪，将输入暂存到临时寄存器
             temp_s_axi_rvalid_next = s_axi_rvalid_int;
             store_axi_r_int_to_temp = 1'b1;
         end
     end else if (s_axi_rready) begin
-        // input is not ready, but output is ready
+        // 输入端未就绪，但输出端就绪
         s_axi_rvalid_next = temp_s_axi_rvalid_reg;
         temp_s_axi_rvalid_next = 1'b0;
         store_axi_r_temp_to_output = 1'b1;
@@ -657,7 +663,7 @@ always @(posedge clk) begin
         temp_s_axi_rvalid_reg <= temp_s_axi_rvalid_next;
     end
 
-    // datapath
+    // 数据通路寄存
     if (store_axi_r_int_to_output) begin
         s_axi_rid_reg <= s_axi_rid_int;
         s_axi_rdata_reg <= s_axi_rdata_int;

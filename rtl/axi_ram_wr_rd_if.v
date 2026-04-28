@@ -22,154 +22,160 @@ THE SOFTWARE.
 
 */
 
-// Language: Verilog 2001
+// 语言: Verilog 2001
 
 `resetall
 `timescale 1ns / 1ps
 `default_nettype none
 
 /*
- * AXI4 RAM read/write interface
+ * AXI4 RAM 读写接口
+ *
+ * 模块目录
+ * 1) 实例化独立写命令生成器（`axi_ram_wr_if`）。
+ * 2) 实例化独立读命令生成器（`axi_ram_rd_if`）。
+ * 3) 在读写两路命令流间仲裁共享 RAM 命令端口。
+ * 4) 通过可选交织策略控制长突发场景下的公平性。
  */
 module axi_ram_wr_rd_if #
 (
-    // Width of data bus in bits
+    // 数据总线位宽
     parameter DATA_WIDTH = 32,
-    // Width of address bus in bits
+    // 地址总线位宽
     parameter ADDR_WIDTH = 16,
-    // Width of wstrb (width of data bus in words)
+    // WSTRB 位宽（按字节 lane）
     parameter STRB_WIDTH = (DATA_WIDTH/8),
-    // Width of ID signal
+    // ID 信号位宽
     parameter ID_WIDTH = 8,
-    // Propagate awuser signal
+    // 是否透传 awuser 信号
     parameter AWUSER_ENABLE = 0,
-    // Width of awuser signal
+    // awuser 信号位宽
     parameter AWUSER_WIDTH = 1,
-    // Propagate wuser signal
+    // 是否透传 wuser 信号
     parameter WUSER_ENABLE = 0,
-    // Width of wuser signal
+    // wuser 信号位宽
     parameter WUSER_WIDTH = 1,
-    // Propagate buser signal
+    // 是否透传 buser 信号
     parameter BUSER_ENABLE = 0,
-    // Width of buser signal
+    // buser 信号位宽
     parameter BUSER_WIDTH = 1,
-    // Propagate aruser signal
+    // 是否透传 aruser 信号
     parameter ARUSER_ENABLE = 0,
-    // Width of aruser signal
+    // aruser 信号位宽
     parameter ARUSER_WIDTH = 1,
-    // Propagate ruser signal
+    // 是否透传 ruser 信号
     parameter RUSER_ENABLE = 0,
-    // Width of ruser signal
+    // ruser 信号位宽
     parameter RUSER_WIDTH = 1,
-    // Width of auser output
+    // auser 输出位宽
     parameter AUSER_WIDTH = (ARUSER_ENABLE && (!AWUSER_ENABLE || ARUSER_WIDTH > AWUSER_WIDTH)) ? ARUSER_WIDTH : AWUSER_WIDTH,
-    // Extra pipeline register on output
+    // 输出端额外流水寄存器开关
     parameter PIPELINE_OUTPUT = 0,
-    // Interleave read and write burst cycles
+    // 读写突发周期交织开关
     parameter INTERLEAVE = 0
 )
 (
-    input  wire                     clk,
-    input  wire                     rst,
+    input  wire                     clk, // 读写子接口与仲裁逻辑共用时钟。
+    input  wire                     rst, // 共用同步复位。
 
     /*
-     * AXI slave interface
+     * AXI 从接口
      */
-    input  wire [ID_WIDTH-1:0]      s_axi_awid,
-    input  wire [ADDR_WIDTH-1:0]    s_axi_awaddr,
-    input  wire [7:0]               s_axi_awlen,
-    input  wire [2:0]               s_axi_awsize,
-    input  wire [1:0]               s_axi_awburst,
-    input  wire                     s_axi_awlock,
-    input  wire [3:0]               s_axi_awcache,
-    input  wire [2:0]               s_axi_awprot,
-    input  wire [3:0]               s_axi_awqos,
-    input  wire [3:0]               s_axi_awregion,
-    input  wire [AWUSER_WIDTH-1:0]  s_axi_awuser,
-    input  wire                     s_axi_awvalid,
-    output wire                     s_axi_awready,
-    input  wire [DATA_WIDTH-1:0]    s_axi_wdata,
-    input  wire [STRB_WIDTH-1:0]    s_axi_wstrb,
-    input  wire                     s_axi_wlast,
-    input  wire [WUSER_WIDTH-1:0]   s_axi_wuser,
-    input  wire                     s_axi_wvalid,
-    output wire                     s_axi_wready,
-    output wire [ID_WIDTH-1:0]      s_axi_bid,
-    output wire [1:0]               s_axi_bresp,
-    output wire [BUSER_WIDTH-1:0]   s_axi_buser,
-    output wire                     s_axi_bvalid,
-    input  wire                     s_axi_bready,
-    input  wire [ID_WIDTH-1:0]      s_axi_arid,
-    input  wire [ADDR_WIDTH-1:0]    s_axi_araddr,
-    input  wire [7:0]               s_axi_arlen,
-    input  wire [2:0]               s_axi_arsize,
-    input  wire [1:0]               s_axi_arburst,
-    input  wire                     s_axi_arlock,
-    input  wire [3:0]               s_axi_arcache,
-    input  wire [2:0]               s_axi_arprot,
-    input  wire [3:0]               s_axi_arqos,
-    input  wire [3:0]               s_axi_arregion,
-    input  wire [ARUSER_WIDTH-1:0]  s_axi_aruser,
-    input  wire                     s_axi_arvalid,
-    output wire                     s_axi_arready,
-    output wire [ID_WIDTH-1:0]      s_axi_rid,
-    output wire [DATA_WIDTH-1:0]    s_axi_rdata,
-    output wire [1:0]               s_axi_rresp,
-    output wire                     s_axi_rlast,
-    output wire [RUSER_WIDTH-1:0]   s_axi_ruser,
-    output wire                     s_axi_rvalid,
-    input  wire                     s_axi_rready,
+    input  wire [ID_WIDTH-1:0]      s_axi_awid, // AXI AW ID（写地址通道标识）。
+    input  wire [ADDR_WIDTH-1:0]    s_axi_awaddr, // AXI AW 地址。
+    input  wire [7:0]               s_axi_awlen, // AXI AW 突发长度。
+    input  wire [2:0]               s_axi_awsize, // AXI AW 突发尺寸。
+    input  wire [1:0]               s_axi_awburst, // AXI AW 突发类型。
+    input  wire                     s_axi_awlock, // AXI AW 锁属性。
+    input  wire [3:0]               s_axi_awcache, // AXI AW cache 属性。
+    input  wire [2:0]               s_axi_awprot, // AXI AW 保护属性。
+    input  wire [3:0]               s_axi_awqos, // AXI AW QoS（服务质量字段）。
+    input  wire [3:0]               s_axi_awregion, // AXI AW region（区域属性字段）。
+    input  wire [AWUSER_WIDTH-1:0]  s_axi_awuser, // AXI AW 用户旁带。
+    input  wire                     s_axi_awvalid, // AXI AWVALID（写地址有效）。
+    output wire                     s_axi_awready, // AXI AWREADY（写地址就绪）。
+    input  wire [DATA_WIDTH-1:0]    s_axi_wdata, // AXI W 数据。
+    input  wire [STRB_WIDTH-1:0]    s_axi_wstrb, // AXI W 字节使能。
+    input  wire                     s_axi_wlast, // AXI WLAST（写突发最后一拍）。
+    input  wire [WUSER_WIDTH-1:0]   s_axi_wuser, // AXI W 用户旁带。
+    input  wire                     s_axi_wvalid, // AXI WVALID（写数据有效）。
+    output wire                     s_axi_wready, // AXI WREADY（写数据就绪）。
+    output wire [ID_WIDTH-1:0]      s_axi_bid, // AXI BID（写响应标识）。
+    output wire [1:0]               s_axi_bresp, // AXI BRESP（写响应码）。
+    output wire [BUSER_WIDTH-1:0]   s_axi_buser, // AXI BUSER（写响应用户旁带）。
+    output wire                     s_axi_bvalid, // AXI BVALID（写响应有效）。
+    input  wire                     s_axi_bready, // AXI BREADY（写响应就绪）。
+    input  wire [ID_WIDTH-1:0]      s_axi_arid, // AXI AR ID（读地址通道标识）。
+    input  wire [ADDR_WIDTH-1:0]    s_axi_araddr, // AXI AR 地址。
+    input  wire [7:0]               s_axi_arlen, // AXI AR 突发长度。
+    input  wire [2:0]               s_axi_arsize, // AXI AR 突发尺寸。
+    input  wire [1:0]               s_axi_arburst, // AXI AR 突发类型。
+    input  wire                     s_axi_arlock, // AXI AR 锁属性。
+    input  wire [3:0]               s_axi_arcache, // AXI AR cache 属性。
+    input  wire [2:0]               s_axi_arprot, // AXI AR 保护属性。
+    input  wire [3:0]               s_axi_arqos, // AXI AR QoS（服务质量字段）。
+    input  wire [3:0]               s_axi_arregion, // AXI AR region（区域属性字段）。
+    input  wire [ARUSER_WIDTH-1:0]  s_axi_aruser, // AXI AR 用户旁带。
+    input  wire                     s_axi_arvalid, // AXI ARVALID（读地址有效）。
+    output wire                     s_axi_arready, // AXI ARREADY（读地址就绪）。
+    output wire [ID_WIDTH-1:0]      s_axi_rid, // AXI RID（读数据通道标识）。
+    output wire [DATA_WIDTH-1:0]    s_axi_rdata, // AXI RDATA（读数据载荷）。
+    output wire [1:0]               s_axi_rresp, // AXI RRESP（读响应码）。
+    output wire                     s_axi_rlast, // AXI RLAST（读突发最后一拍）。
+    output wire [RUSER_WIDTH-1:0]   s_axi_ruser, // AXI RUSER（读用户旁带）。
+    output wire                     s_axi_rvalid, // AXI RVALID（读数据有效）。
+    input  wire                     s_axi_rready, // AXI RREADY（读数据就绪）。
 
     /*
-     * RAM interface
+     * RAM 接口
      */
-    output wire [ID_WIDTH-1:0]      ram_cmd_id,
-    output wire [ADDR_WIDTH-1:0]    ram_cmd_addr,
-    output wire                     ram_cmd_lock,
-    output wire [3:0]               ram_cmd_cache,
-    output wire [2:0]               ram_cmd_prot,
-    output wire [3:0]               ram_cmd_qos,
-    output wire [3:0]               ram_cmd_region,
-    output wire [AUSER_WIDTH-1:0]   ram_cmd_auser,
-    output wire [DATA_WIDTH-1:0]    ram_cmd_wr_data,
-    output wire [STRB_WIDTH-1:0]    ram_cmd_wr_strb,
-    output wire [WUSER_WIDTH-1:0]   ram_cmd_wr_user,
-    output wire                     ram_cmd_wr_en,
-    output wire                     ram_cmd_rd_en,
-    output wire                     ram_cmd_last,
-    input  wire                     ram_cmd_ready,
-    input  wire [ID_WIDTH-1:0]      ram_rd_resp_id,
-    input  wire [DATA_WIDTH-1:0]    ram_rd_resp_data,
-    input  wire                     ram_rd_resp_last,
-    input  wire [RUSER_WIDTH-1:0]   ram_rd_resp_user,
-    input  wire                     ram_rd_resp_valid,
-    output wire                     ram_rd_resp_ready
+    output wire [ID_WIDTH-1:0]      ram_cmd_id, // 仲裁后的 RAM 命令 ID。
+    output wire [ADDR_WIDTH-1:0]    ram_cmd_addr, // 仲裁后的 RAM 命令地址。
+    output wire                     ram_cmd_lock, // 仲裁后的锁属性。
+    output wire [3:0]               ram_cmd_cache, // 仲裁后的 cache 属性。
+    output wire [2:0]               ram_cmd_prot, // 仲裁后的保护属性。
+    output wire [3:0]               ram_cmd_qos, // 仲裁后的 QoS 属性。
+    output wire [3:0]               ram_cmd_region, // 仲裁后的 region 属性。
+    output wire [AUSER_WIDTH-1:0]   ram_cmd_auser, // 仲裁后的 AUSER 属性。
+    output wire [DATA_WIDTH-1:0]    ram_cmd_wr_data, // RAM 命令端口写数据载荷。
+    output wire [STRB_WIDTH-1:0]    ram_cmd_wr_strb, // RAM 命令端口写字节使能。
+    output wire [WUSER_WIDTH-1:0]   ram_cmd_wr_user, // RAM 命令端口写用户旁带。
+    output wire                     ram_cmd_wr_en, // 仲裁后的写命令有效。
+    output wire                     ram_cmd_rd_en, // 仲裁后的读命令有效。
+    output wire                     ram_cmd_last, // 当前选中命令流最后一拍标记。
+    input  wire                     ram_cmd_ready, // RAM 命令 ready。
+    input  wire [ID_WIDTH-1:0]      ram_rd_resp_id, // RAM 读响应 ID。
+    input  wire [DATA_WIDTH-1:0]    ram_rd_resp_data, // RAM 读响应数据。
+    input  wire                     ram_rd_resp_last, // RAM 读响应最后一拍标记。
+    input  wire [RUSER_WIDTH-1:0]   ram_rd_resp_user, // RAM 读响应用户旁带。
+    input  wire                     ram_rd_resp_valid, // RAM 读响应有效。
+    output wire                     ram_rd_resp_ready // RAM 读响应 ready。
 );
 
 
-wire [ID_WIDTH-1:0]      ram_wr_cmd_id;
-wire [ADDR_WIDTH-1:0]    ram_wr_cmd_addr;
-wire                     ram_wr_cmd_lock;
-wire [3:0]               ram_wr_cmd_cache;
-wire [2:0]               ram_wr_cmd_prot;
-wire [3:0]               ram_wr_cmd_qos;
-wire [3:0]               ram_wr_cmd_region;
-wire [AWUSER_WIDTH-1:0]  ram_wr_cmd_auser;
-wire                     ram_wr_cmd_en;
-wire                     ram_wr_cmd_last;
-wire                     ram_wr_cmd_ready;
+wire [ID_WIDTH-1:0]      ram_wr_cmd_id; // 写侧生成的命令 ID。
+wire [ADDR_WIDTH-1:0]    ram_wr_cmd_addr; // 写侧生成的命令地址。
+wire                     ram_wr_cmd_lock; // 写侧生成的锁属性。
+wire [3:0]               ram_wr_cmd_cache; // 写侧生成的 cache 属性。
+wire [2:0]               ram_wr_cmd_prot; // 写侧生成的保护属性。
+wire [3:0]               ram_wr_cmd_qos; // 写侧生成的 QoS 属性。
+wire [3:0]               ram_wr_cmd_region; // 写侧生成的 region 属性。
+wire [AWUSER_WIDTH-1:0]  ram_wr_cmd_auser; // 写侧生成的 AUSER。
+wire                     ram_wr_cmd_en; // 写侧命令有效。
+wire                     ram_wr_cmd_last; // 写侧命令最后一拍标记。
+wire                     ram_wr_cmd_ready; // 仲裁器返回的写侧命令 ready。
 
-wire [ID_WIDTH-1:0]      ram_rd_cmd_id;
-wire [ADDR_WIDTH-1:0]    ram_rd_cmd_addr;
-wire                     ram_rd_cmd_lock;
-wire [3:0]               ram_rd_cmd_cache;
-wire [2:0]               ram_rd_cmd_prot;
-wire [3:0]               ram_rd_cmd_qos;
-wire [3:0]               ram_rd_cmd_region;
-wire [AWUSER_WIDTH-1:0]  ram_rd_cmd_auser;
-wire                     ram_rd_cmd_en;
-wire                     ram_rd_cmd_last;
-wire                     ram_rd_cmd_ready;
+wire [ID_WIDTH-1:0]      ram_rd_cmd_id; // 读侧生成的命令 ID。
+wire [ADDR_WIDTH-1:0]    ram_rd_cmd_addr; // 读侧生成的命令地址。
+wire                     ram_rd_cmd_lock; // 读侧生成的锁属性。
+wire [3:0]               ram_rd_cmd_cache; // 读侧生成的 cache 属性。
+wire [2:0]               ram_rd_cmd_prot; // 读侧生成的保护属性。
+wire [3:0]               ram_rd_cmd_qos; // 读侧生成的 QoS 属性。
+wire [3:0]               ram_rd_cmd_region; // 读侧生成的 region 属性。
+wire [AWUSER_WIDTH-1:0]  ram_rd_cmd_auser; // 读侧生成的 AUSER。
+wire                     ram_rd_cmd_en; // 读侧命令有效。
+wire                     ram_rd_cmd_last; // 读侧命令最后一拍标记。
+wire                     ram_rd_cmd_ready; // 仲裁器返回的读侧命令 ready。
 
 axi_ram_wr_if #(
     .DATA_WIDTH(DATA_WIDTH),
@@ -279,15 +285,15 @@ axi_ram_rd_if_inst (
     .ram_rd_resp_ready(ram_rd_resp_ready)
 );
 
-// arbitration
-reg read_eligible;
-reg write_eligible;
+// 仲裁逻辑
+reg read_eligible; // 本拍可接纳读命令时为真。
+reg write_eligible; // 本拍可接纳写命令时为真。
 
-reg write_en;
-reg read_en;
+reg write_en; // 仲裁决策：本拍授予写命令。
+reg read_en; // 仲裁决策：本拍授予读命令。
 
-reg last_read_reg = 1'b0, last_read_next;
-reg transaction_reg = 1'b0, transaction_next;
+reg last_read_reg = 1'b0, last_read_next; // 公平性提示：记录上次授予的命令类型。
+reg transaction_reg = 1'b0, transaction_next; // 跟踪当前突发事务是否仍在进行。
 
 assign ram_cmd_wr_en = write_en;
 assign ram_cmd_rd_en = read_en;

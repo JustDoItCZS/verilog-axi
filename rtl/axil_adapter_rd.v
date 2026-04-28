@@ -22,55 +22,61 @@ THE SOFTWARE.
 
 */
 
-// Language: Verilog 2001
+// 语言: Verilog 2001
 
 `resetall
 `timescale 1ns / 1ps
 `default_nettype none
 
 /*
- * AXI4 lite width adapter (read)
+ * AXI4-Lite 位宽适配器（读通道）
+ *
+ * 模块目录
+ * 1) 接收从侧 AXI-Lite 读地址并返回读数据/响应。
+ * 2) 在主从位宽不一致时对读数据进行重组。
+ * 3) 主侧位宽较窄时：发起多次主侧读并拼装成一次从侧响应。
+ * 4) 主侧位宽相同或更宽时：执行单次直接转发。
  */
 module axil_adapter_rd #
 (
-    // Width of address bus in bits
+    // 地址总线位宽
     parameter ADDR_WIDTH = 32,
-    // Width of input (slave) interface data bus in bits
+    // 输入（从侧）接口数据位宽
     parameter S_DATA_WIDTH = 32,
-    // Width of input (slave) interface wstrb (width of data bus in words)
+    // 输入（从侧）接口 WSTRB 位宽（按字节）
     parameter S_STRB_WIDTH = (S_DATA_WIDTH/8),
-    // Width of output (master) interface data bus in bits
+    // 输出（主侧）接口数据位宽
     parameter M_DATA_WIDTH = 32,
-    // Width of output (master) interface wstrb (width of data bus in words)
+    // 输出（主侧）接口 WSTRB 位宽（按字节）
     parameter M_STRB_WIDTH = (M_DATA_WIDTH/8)
 )
 (
-    input  wire                     clk,
-    input  wire                     rst,
+    input  wire                     clk,            // 适配状态机与读通道寄存器时钟。
+    input  wire                     rst,            // 适配器状态同步复位。
 
     /*
-     * AXI lite slave interface
+     * AXI-Lite 从接口
      */
-    input  wire [ADDR_WIDTH-1:0]    s_axil_araddr,
-    input  wire [2:0]               s_axil_arprot,
-    input  wire                     s_axil_arvalid,
-    output wire                     s_axil_arready,
-    output wire [S_DATA_WIDTH-1:0]  s_axil_rdata,
-    output wire [1:0]               s_axil_rresp,
-    output wire                     s_axil_rvalid,
-    input  wire                     s_axil_rready,
+    input  wire [ADDR_WIDTH-1:0]    s_axil_araddr,  // 从侧 AR 地址（位宽转换前）。
+    input  wire [2:0]               s_axil_arprot,  // 从侧 AR 保护属性。
+    input  wire                     s_axil_arvalid, // 从侧 AR 有效。
+    output wire                     s_axil_arready, // 从侧 AR 就绪（由适配器状态机生成）。
+    output wire [S_DATA_WIDTH-1:0]  s_axil_rdata,   // 从侧 R 数据（按从侧位宽组装）。
+    output wire [1:0]               s_axil_rresp,   // 从侧 R 响应（合并后）。
+    output wire                     s_axil_rvalid,  // 从侧 R 有效。
+    input  wire                     s_axil_rready,  // 从侧 R 就绪。
 
     /*
-     * AXI lite master interface
+     * AXI-Lite 主接口
      */
-    output wire [ADDR_WIDTH-1:0]    m_axil_araddr,
-    output wire [2:0]               m_axil_arprot,
-    output wire                     m_axil_arvalid,
-    input  wire                     m_axil_arready,
-    input  wire [M_DATA_WIDTH-1:0]  m_axil_rdata,
-    input  wire [1:0]               m_axil_rresp,
-    input  wire                     m_axil_rvalid,
-    output wire                     m_axil_rready
+    output wire [ADDR_WIDTH-1:0]    m_axil_araddr,  // 主侧 AR 地址（适配/分段后）。
+    output wire [2:0]               m_axil_arprot,  // 主侧 AR 保护属性。
+    output wire                     m_axil_arvalid, // 主侧 AR 有效。
+    input  wire                     m_axil_arready, // 主侧 AR 就绪（来自下游目标）。
+    input  wire [M_DATA_WIDTH-1:0]  m_axil_rdata,   // 主侧 R 数据（来自下游目标）。
+    input  wire [1:0]               m_axil_rresp,   // 主侧 R 响应（来自下游目标）。
+    input  wire                     m_axil_rvalid,  // 主侧 R 有效（来自下游目标）。
+    output wire                     m_axil_rready   // 主侧 R 就绪（由适配器状态机驱动）。
 );
 
 parameter S_ADDR_BIT_OFFSET = $clog2(S_STRB_WIDTH);
@@ -82,18 +88,18 @@ parameter M_WORD_SIZE = M_DATA_WIDTH/M_WORD_WIDTH;
 parameter S_ADDR_MASK = {ADDR_WIDTH{1'b1}} << S_ADDR_BIT_OFFSET;
 parameter M_ADDR_MASK = {ADDR_WIDTH{1'b1}} << M_ADDR_BIT_OFFSET;
 
-// output bus is wider
+// 主侧数据总线更宽
 parameter EXPAND = M_STRB_WIDTH > S_STRB_WIDTH;
 parameter DATA_WIDTH = EXPAND ? M_DATA_WIDTH : S_DATA_WIDTH;
 parameter STRB_WIDTH = EXPAND ? M_STRB_WIDTH : S_STRB_WIDTH;
-// required number of segments in wider bus
+// 宽总线下所需分段数
 parameter SEGMENT_COUNT = EXPAND ? (M_STRB_WIDTH / S_STRB_WIDTH) : (S_STRB_WIDTH / M_STRB_WIDTH);
 parameter SEGMENT_COUNT_WIDTH = SEGMENT_COUNT == 1 ? 1 : $clog2(SEGMENT_COUNT);
-// data width and keep width per segment
+// 每段数据位宽与字节使能位宽
 parameter SEGMENT_DATA_WIDTH = DATA_WIDTH / SEGMENT_COUNT;
 parameter SEGMENT_STRB_WIDTH = STRB_WIDTH / SEGMENT_COUNT;
 
-// bus width assertions
+// 总线位宽约束检查
 initial begin
     if (S_WORD_SIZE * S_STRB_WIDTH != S_DATA_WIDTH) begin
         $error("Error: AXI slave interface data width not evenly divisble (instance %m)");
@@ -125,19 +131,19 @@ localparam [0:0]
     STATE_IDLE = 1'd0,
     STATE_DATA = 1'd1;
 
-reg [0:0] state_reg = STATE_IDLE, state_next;
+reg [0:0] state_reg = STATE_IDLE, state_next; // 读适配状态机当前状态与下一状态。
 
-reg [SEGMENT_COUNT_WIDTH-1:0] current_segment_reg = 0, current_segment_next;
+reg [SEGMENT_COUNT_WIDTH-1:0] current_segment_reg = 0, current_segment_next; // 主侧位宽较窄时的当前分段索引。
 
-reg s_axil_arready_reg = 1'b0, s_axil_arready_next;
-reg [S_DATA_WIDTH-1:0] s_axil_rdata_reg = {S_DATA_WIDTH{1'b0}}, s_axil_rdata_next;
-reg [1:0] s_axil_rresp_reg = 2'd0, s_axil_rresp_next;
-reg s_axil_rvalid_reg = 1'b0, s_axil_rvalid_next;
+reg s_axil_arready_reg = 1'b0, s_axil_arready_next; // 从侧 AR 就绪当前状态与下一状态。
+reg [S_DATA_WIDTH-1:0] s_axil_rdata_reg = {S_DATA_WIDTH{1'b0}}, s_axil_rdata_next; // 从侧 R 数据寄存器当前值与下一值。
+reg [1:0] s_axil_rresp_reg = 2'd0, s_axil_rresp_next; // 从侧 R 响应寄存器当前值与下一值。
+reg s_axil_rvalid_reg = 1'b0, s_axil_rvalid_next; // 从侧 R 有效当前状态与下一状态。
 
-reg [ADDR_WIDTH-1:0] m_axil_araddr_reg = {ADDR_WIDTH{1'b0}}, m_axil_araddr_next;
-reg [2:0] m_axil_arprot_reg = 3'd0, m_axil_arprot_next;
-reg m_axil_arvalid_reg = 1'b0, m_axil_arvalid_next;
-reg m_axil_rready_reg = 1'b0, m_axil_rready_next;
+reg [ADDR_WIDTH-1:0] m_axil_araddr_reg = {ADDR_WIDTH{1'b0}}, m_axil_araddr_next; // 主侧 AR 地址寄存器当前值与下一值。
+reg [2:0] m_axil_arprot_reg = 3'd0, m_axil_arprot_next; // 主侧 AR 保护属性寄存器当前值与下一值。
+reg m_axil_arvalid_reg = 1'b0, m_axil_arvalid_next; // 主侧 AR 有效当前状态与下一状态。
+reg m_axil_rready_reg = 1'b0, m_axil_rready_next; // 主侧 R 就绪当前状态与下一状态。
 
 assign s_axil_arready = s_axil_arready_reg;
 assign s_axil_rdata = s_axil_rdata_reg;
@@ -164,7 +170,7 @@ always @* begin
     m_axil_rready_next = 1'b0;
 
     if (SEGMENT_COUNT == 1 || EXPAND) begin
-        // master output is same width or wider; single cycle direct transfer
+        // 主侧位宽相同或更宽：单次直接传输
         case (state_reg)
             STATE_IDLE: begin
                 s_axil_arready_next = !m_axil_arvalid;
@@ -200,7 +206,7 @@ always @* begin
             end
         endcase
     end else begin
-        // master output is narrower; may need several cycles
+        // 主侧位宽更窄：可能需要多拍拼装
         case (state_reg)
             STATE_IDLE: begin
                 s_axil_arready_next = !m_axil_arvalid;

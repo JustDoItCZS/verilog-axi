@@ -22,169 +22,174 @@ THE SOFTWARE.
 
 */
 
-// Language: Verilog 2001
+// 语言: Verilog 2001
 
 `resetall
 `timescale 1ns / 1ps
 `default_nettype none
 
 /*
- * AXI4 DMA
+ * AXI4 DMA 顶层模块
+ *
+ * 模块目录
+ * 1) 读路径由 `axi_dma_rd` 实现：AXI 内存 -> AXIS 流。
+ * 2) 写路径由 `axi_dma_wr` 实现：AXIS 流 -> AXI 内存。
+ * 3) 顶层负责读写两引擎拼接与共享配置分发。
  */
 module axi_dma #
 (
-    // Width of AXI data bus in bits
+    // AXI 数据总线位宽
     parameter AXI_DATA_WIDTH = 32,
-    // Width of AXI address bus in bits
+    // AXI 地址总线位宽
     parameter AXI_ADDR_WIDTH = 16,
-    // Width of AXI wstrb (width of data bus in words)
+    // AXI WSTRB 位宽（按字节）
     parameter AXI_STRB_WIDTH = (AXI_DATA_WIDTH/8),
-    // Width of AXI ID signal
+    // AXI ID 信号位宽
     parameter AXI_ID_WIDTH = 8,
-    // Maximum AXI burst length to generate
+    // 生成的 AXI 最大突发长度
     parameter AXI_MAX_BURST_LEN = 16,
-    // Width of AXI stream interfaces in bits
+    // AXI-Stream 接口数据位宽
     parameter AXIS_DATA_WIDTH = AXI_DATA_WIDTH,
-    // Use AXI stream tkeep signal
+    // 是否使用 AXI-Stream TKEEP
     parameter AXIS_KEEP_ENABLE = (AXIS_DATA_WIDTH>8),
-    // AXI stream tkeep signal width (words per cycle)
+    // AXI-Stream TKEEP 位宽（每拍字节数）
     parameter AXIS_KEEP_WIDTH = (AXIS_DATA_WIDTH/8),
-    // Use AXI stream tlast signal
+    // 是否使用 AXI-Stream TLAST
     parameter AXIS_LAST_ENABLE = 1,
-    // Propagate AXI stream tid signal
+    // 是否透传 AXI-Stream TID
     parameter AXIS_ID_ENABLE = 0,
-    // AXI stream tid signal width
+    // AXI-Stream TID 位宽
     parameter AXIS_ID_WIDTH = 8,
-    // Propagate AXI stream tdest signal
+    // 是否透传 AXI-Stream TDEST
     parameter AXIS_DEST_ENABLE = 0,
-    // AXI stream tdest signal width
+    // AXI-Stream TDEST 位宽
     parameter AXIS_DEST_WIDTH = 8,
-    // Propagate AXI stream tuser signal
+    // 是否透传 AXI-Stream TUSER
     parameter AXIS_USER_ENABLE = 1,
-    // AXI stream tuser signal width
+    // AXI-Stream TUSER 位宽
     parameter AXIS_USER_WIDTH = 1,
-    // Width of length field
+    // 长度字段位宽
     parameter LEN_WIDTH = 20,
-    // Width of tag field
+    // tag 字段位宽
     parameter TAG_WIDTH = 8,
-    // Enable support for scatter/gather DMA
-    // (multiple descriptors per AXI stream frame)
+    // 是否启用散列/聚集 DMA 支持
+    // （每个 AXI-Stream 帧可含多个描述符）
     parameter ENABLE_SG = 0,
-    // Enable support for unaligned transfers
+    // 是否启用非对齐传输支持
     parameter ENABLE_UNALIGNED = 0
 )
 (
-    input  wire                       clk,
-    input  wire                       rst,
+    input  wire                       clk, // DMA 顶层时钟。
+    input  wire                       rst, // 同步复位，高电平有效。
 
     /*
-     * AXI read descriptor input
+     * AXI 读描述符输入
      */
-    input  wire [AXI_ADDR_WIDTH-1:0]  s_axis_read_desc_addr,
-    input  wire [LEN_WIDTH-1:0]       s_axis_read_desc_len,
-    input  wire [TAG_WIDTH-1:0]       s_axis_read_desc_tag,
-    input  wire [AXIS_ID_WIDTH-1:0]   s_axis_read_desc_id,
-    input  wire [AXIS_DEST_WIDTH-1:0] s_axis_read_desc_dest,
-    input  wire [AXIS_USER_WIDTH-1:0] s_axis_read_desc_user,
-    input  wire                       s_axis_read_desc_valid,
-    output wire                       s_axis_read_desc_ready,
+    input  wire [AXI_ADDR_WIDTH-1:0]  s_axis_read_desc_addr, // 读描述符源地址。
+    input  wire [LEN_WIDTH-1:0]       s_axis_read_desc_len, // 读描述符长度。
+    input  wire [TAG_WIDTH-1:0]       s_axis_read_desc_tag, // 读描述符 tag。
+    input  wire [AXIS_ID_WIDTH-1:0]   s_axis_read_desc_id, // 读描述符附带 AXIS ID。
+    input  wire [AXIS_DEST_WIDTH-1:0] s_axis_read_desc_dest, // 读描述符附带 AXIS DEST。
+    input  wire [AXIS_USER_WIDTH-1:0] s_axis_read_desc_user, // 读描述符附带 AXIS USER。
+    input  wire                       s_axis_read_desc_valid, // 读描述符有效。
+    output wire                       s_axis_read_desc_ready, // 读引擎可接收描述符。
 
     /*
-     * AXI read descriptor status output
+     * AXI 读描述符状态输出
      */
-    output wire [TAG_WIDTH-1:0]       m_axis_read_desc_status_tag,
-    output wire [3:0]                 m_axis_read_desc_status_error,
-    output wire                       m_axis_read_desc_status_valid,
+    output wire [TAG_WIDTH-1:0]       m_axis_read_desc_status_tag, // 读完成状态 tag。
+    output wire [3:0]                 m_axis_read_desc_status_error, // 读完成状态错误码。
+    output wire                       m_axis_read_desc_status_valid, // 读完成状态有效。
 
     /*
-     * AXI stream read data output
+     * AXI-Stream 读数据输出
      */
-    output wire [AXIS_DATA_WIDTH-1:0] m_axis_read_data_tdata,
-    output wire [AXIS_KEEP_WIDTH-1:0] m_axis_read_data_tkeep,
-    output wire                       m_axis_read_data_tvalid,
-    input  wire                       m_axis_read_data_tready,
-    output wire                       m_axis_read_data_tlast,
-    output wire [AXIS_ID_WIDTH-1:0]   m_axis_read_data_tid,
-    output wire [AXIS_DEST_WIDTH-1:0] m_axis_read_data_tdest,
-    output wire [AXIS_USER_WIDTH-1:0] m_axis_read_data_tuser,
+    output wire [AXIS_DATA_WIDTH-1:0] m_axis_read_data_tdata, // 读数据流 tdata。
+    output wire [AXIS_KEEP_WIDTH-1:0] m_axis_read_data_tkeep, // 读数据流 tkeep。
+    output wire                       m_axis_read_data_tvalid, // 读数据流 tvalid。
+    input  wire                       m_axis_read_data_tready, // 读数据流 tready。
+    output wire                       m_axis_read_data_tlast, // 读数据流 tlast。
+    output wire [AXIS_ID_WIDTH-1:0]   m_axis_read_data_tid, // 读数据流 tid。
+    output wire [AXIS_DEST_WIDTH-1:0] m_axis_read_data_tdest, // 读数据流 tdest。
+    output wire [AXIS_USER_WIDTH-1:0] m_axis_read_data_tuser, // 读数据流 tuser。
 
     /*
-     * AXI write descriptor input
+     * AXI 写描述符输入
      */
-    input  wire [AXI_ADDR_WIDTH-1:0]  s_axis_write_desc_addr,
-    input  wire [LEN_WIDTH-1:0]       s_axis_write_desc_len,
-    input  wire [TAG_WIDTH-1:0]       s_axis_write_desc_tag,
-    input  wire                       s_axis_write_desc_valid,
-    output wire                       s_axis_write_desc_ready,
+    input  wire [AXI_ADDR_WIDTH-1:0]  s_axis_write_desc_addr, // 写描述符目的地址。
+    input  wire [LEN_WIDTH-1:0]       s_axis_write_desc_len, // 写描述符长度。
+    input  wire [TAG_WIDTH-1:0]       s_axis_write_desc_tag, // 写描述符 tag。
+    input  wire                       s_axis_write_desc_valid, // 写描述符有效。
+    output wire                       s_axis_write_desc_ready, // 写引擎可接收描述符。
 
     /*
-     * AXI write descriptor status output
+     * AXI 写描述符状态输出
      */
-    output wire [LEN_WIDTH-1:0]       m_axis_write_desc_status_len,
-    output wire [TAG_WIDTH-1:0]       m_axis_write_desc_status_tag,
-    output wire [AXIS_ID_WIDTH-1:0]   m_axis_write_desc_status_id,
-    output wire [AXIS_DEST_WIDTH-1:0] m_axis_write_desc_status_dest,
-    output wire [AXIS_USER_WIDTH-1:0] m_axis_write_desc_status_user,
-    output wire [3:0]                 m_axis_write_desc_status_error,
-    output wire                       m_axis_write_desc_status_valid,
+    output wire [LEN_WIDTH-1:0]       m_axis_write_desc_status_len, // 写完成状态实际写入长度。
+    output wire [TAG_WIDTH-1:0]       m_axis_write_desc_status_tag, // 写完成状态 tag。
+    output wire [AXIS_ID_WIDTH-1:0]   m_axis_write_desc_status_id, // 写完成状态 tid。
+    output wire [AXIS_DEST_WIDTH-1:0] m_axis_write_desc_status_dest, // 写完成状态 tdest。
+    output wire [AXIS_USER_WIDTH-1:0] m_axis_write_desc_status_user, // 写完成状态 tuser。
+    output wire [3:0]                 m_axis_write_desc_status_error, // 写完成状态错误码。
+    output wire                       m_axis_write_desc_status_valid, // 写完成状态有效。
 
     /*
-     * AXI stream write data input
+     * AXI-Stream 写数据输入
      */
-    input  wire [AXIS_DATA_WIDTH-1:0] s_axis_write_data_tdata,
-    input  wire [AXIS_KEEP_WIDTH-1:0] s_axis_write_data_tkeep,
-    input  wire                       s_axis_write_data_tvalid,
-    output wire                       s_axis_write_data_tready,
-    input  wire                       s_axis_write_data_tlast,
-    input  wire [AXIS_ID_WIDTH-1:0]   s_axis_write_data_tid,
-    input  wire [AXIS_DEST_WIDTH-1:0] s_axis_write_data_tdest,
-    input  wire [AXIS_USER_WIDTH-1:0] s_axis_write_data_tuser,
+    input  wire [AXIS_DATA_WIDTH-1:0] s_axis_write_data_tdata, // 写数据流 tdata。
+    input  wire [AXIS_KEEP_WIDTH-1:0] s_axis_write_data_tkeep, // 写数据流 tkeep。
+    input  wire                       s_axis_write_data_tvalid, // 写数据流 tvalid。
+    output wire                       s_axis_write_data_tready, // 写数据流 tready。
+    input  wire                       s_axis_write_data_tlast, // 写数据流 tlast。
+    input  wire [AXIS_ID_WIDTH-1:0]   s_axis_write_data_tid, // 写数据流 tid。
+    input  wire [AXIS_DEST_WIDTH-1:0] s_axis_write_data_tdest, // 写数据流 tdest。
+    input  wire [AXIS_USER_WIDTH-1:0] s_axis_write_data_tuser, // 写数据流 tuser。
 
     /*
-     * AXI master interface
+     * AXI 主接口
      */
-    output wire [AXI_ID_WIDTH-1:0]    m_axi_awid,
-    output wire [AXI_ADDR_WIDTH-1:0]  m_axi_awaddr,
-    output wire [7:0]                 m_axi_awlen,
-    output wire [2:0]                 m_axi_awsize,
-    output wire [1:0]                 m_axi_awburst,
-    output wire                       m_axi_awlock,
-    output wire [3:0]                 m_axi_awcache,
-    output wire [2:0]                 m_axi_awprot,
-    output wire                       m_axi_awvalid,
-    input  wire                       m_axi_awready,
-    output wire [AXI_DATA_WIDTH-1:0]  m_axi_wdata,
-    output wire [AXI_STRB_WIDTH-1:0]  m_axi_wstrb,
-    output wire                       m_axi_wlast,
-    output wire                       m_axi_wvalid,
-    input  wire                       m_axi_wready,
-    input  wire [AXI_ID_WIDTH-1:0]    m_axi_bid,
-    input  wire [1:0]                 m_axi_bresp,
-    input  wire                       m_axi_bvalid,
-    output wire                       m_axi_bready,
-    output wire [AXI_ID_WIDTH-1:0]    m_axi_arid,
-    output wire [AXI_ADDR_WIDTH-1:0]  m_axi_araddr,
-    output wire [7:0]                 m_axi_arlen,
-    output wire [2:0]                 m_axi_arsize,
-    output wire [1:0]                 m_axi_arburst,
-    output wire                       m_axi_arlock,
-    output wire [3:0]                 m_axi_arcache,
-    output wire [2:0]                 m_axi_arprot,
-    output wire                       m_axi_arvalid,
-    input  wire                       m_axi_arready,
-    input  wire [AXI_ID_WIDTH-1:0]    m_axi_rid,
-    input  wire [AXI_DATA_WIDTH-1:0]  m_axi_rdata,
-    input  wire [1:0]                 m_axi_rresp,
-    input  wire                       m_axi_rlast,
-    input  wire                       m_axi_rvalid,
-    output wire                       m_axi_rready,
+    output wire [AXI_ID_WIDTH-1:0]    m_axi_awid, // AXI 写地址通道 ID。
+    output wire [AXI_ADDR_WIDTH-1:0]  m_axi_awaddr, // AXI 写地址通道地址。
+    output wire [7:0]                 m_axi_awlen, // AXI 写突发长度。
+    output wire [2:0]                 m_axi_awsize, // AXI 写 beat 大小。
+    output wire [1:0]                 m_axi_awburst, // AXI 写突发类型。
+    output wire                       m_axi_awlock, // AXI 写锁属性。
+    output wire [3:0]                 m_axi_awcache, // AXI 写 cache 属性。
+    output wire [2:0]                 m_axi_awprot, // AXI 写保护属性。
+    output wire                       m_axi_awvalid, // AXI 写地址有效。
+    input  wire                       m_axi_awready, // AXI 写地址 ready。
+    output wire [AXI_DATA_WIDTH-1:0]  m_axi_wdata, // AXI 写数据。
+    output wire [AXI_STRB_WIDTH-1:0]  m_axi_wstrb, // AXI 写字节使能。
+    output wire                       m_axi_wlast, // AXI 写最后一拍。
+    output wire                       m_axi_wvalid, // AXI 写数据有效。
+    input  wire                       m_axi_wready, // AXI 写数据 ready。
+    input  wire [AXI_ID_WIDTH-1:0]    m_axi_bid, // AXI 写响应 ID。
+    input  wire [1:0]                 m_axi_bresp, // AXI 写响应状态。
+    input  wire                       m_axi_bvalid, // AXI 写响应有效。
+    output wire                       m_axi_bready, // AXI 写响应 ready。
+    output wire [AXI_ID_WIDTH-1:0]    m_axi_arid, // AXI 读地址通道 ID。
+    output wire [AXI_ADDR_WIDTH-1:0]  m_axi_araddr, // AXI 读地址通道地址。
+    output wire [7:0]                 m_axi_arlen, // AXI 读突发长度。
+    output wire [2:0]                 m_axi_arsize, // AXI 读 beat 大小。
+    output wire [1:0]                 m_axi_arburst, // AXI 读突发类型。
+    output wire                       m_axi_arlock, // AXI 读锁属性。
+    output wire [3:0]                 m_axi_arcache, // AXI 读 cache 属性。
+    output wire [2:0]                 m_axi_arprot, // AXI 读保护属性。
+    output wire                       m_axi_arvalid, // AXI 读地址有效。
+    input  wire                       m_axi_arready, // AXI 读地址 ready。
+    input  wire [AXI_ID_WIDTH-1:0]    m_axi_rid, // AXI 读响应 ID。
+    input  wire [AXI_DATA_WIDTH-1:0]  m_axi_rdata, // AXI 读响应数据。
+    input  wire [1:0]                 m_axi_rresp, // AXI 读响应状态。
+    input  wire                       m_axi_rlast, // AXI 读响应最后一拍。
+    input  wire                       m_axi_rvalid, // AXI 读响应有效。
+    output wire                       m_axi_rready, // AXI 读响应 ready。
 
     /*
-     * Configuration
+     * 配置
      */
-    input  wire                       read_enable,
-    input  wire                       write_enable,
-    input  wire                       write_abort
+    input  wire                       read_enable, // 读 DMA 使能。
+    input  wire                       write_enable, // 写 DMA 使能。
+    input  wire                       write_abort // 写 DMA 中止请求。
 );
 
 axi_dma_rd #(
@@ -213,7 +218,7 @@ axi_dma_rd_inst (
     .rst(rst),
 
     /*
-     * AXI read descriptor input
+     * AXI 读描述符输入
      */
     .s_axis_read_desc_addr(s_axis_read_desc_addr),
     .s_axis_read_desc_len(s_axis_read_desc_len),
@@ -225,14 +230,14 @@ axi_dma_rd_inst (
     .s_axis_read_desc_ready(s_axis_read_desc_ready),
 
     /*
-     * AXI read descriptor status output
+     * AXI 读描述符状态输出
      */
     .m_axis_read_desc_status_tag(m_axis_read_desc_status_tag),
     .m_axis_read_desc_status_error(m_axis_read_desc_status_error),
     .m_axis_read_desc_status_valid(m_axis_read_desc_status_valid),
 
     /*
-     * AXI stream read data output
+     * AXI-Stream 读数据输出
      */
     .m_axis_read_data_tdata(m_axis_read_data_tdata),
     .m_axis_read_data_tkeep(m_axis_read_data_tkeep),
@@ -244,7 +249,7 @@ axi_dma_rd_inst (
     .m_axis_read_data_tuser(m_axis_read_data_tuser),
 
     /*
-     * AXI master interface
+     * AXI 主接口
      */
     .m_axi_arid(m_axi_arid),
     .m_axi_araddr(m_axi_araddr),
@@ -264,7 +269,7 @@ axi_dma_rd_inst (
     .m_axi_rready(m_axi_rready),
 
     /*
-     * Configuration
+     * 配置
      */
     .enable(read_enable)
 );
@@ -295,7 +300,7 @@ axi_dma_wr_inst (
     .rst(rst),
 
     /*
-     * AXI write descriptor input
+     * AXI 写描述符输入
      */
     .s_axis_write_desc_addr(s_axis_write_desc_addr),
     .s_axis_write_desc_len(s_axis_write_desc_len),
@@ -304,7 +309,7 @@ axi_dma_wr_inst (
     .s_axis_write_desc_ready(s_axis_write_desc_ready),
 
     /*
-     * AXI write descriptor status output
+     * AXI 写描述符状态输出
      */
     .m_axis_write_desc_status_len(m_axis_write_desc_status_len),
     .m_axis_write_desc_status_tag(m_axis_write_desc_status_tag),
@@ -315,7 +320,7 @@ axi_dma_wr_inst (
     .m_axis_write_desc_status_valid(m_axis_write_desc_status_valid),
 
     /*
-     * AXI stream write data input
+     * AXI-Stream 写数据输入
      */
     .s_axis_write_data_tdata(s_axis_write_data_tdata),
     .s_axis_write_data_tkeep(s_axis_write_data_tkeep),
@@ -327,7 +332,7 @@ axi_dma_wr_inst (
     .s_axis_write_data_tuser(s_axis_write_data_tuser),
 
     /*
-     * AXI master interface
+     * AXI 主接口
      */
     .m_axi_awid(m_axi_awid),
     .m_axi_awaddr(m_axi_awaddr),
@@ -350,7 +355,7 @@ axi_dma_wr_inst (
     .m_axi_bready(m_axi_bready),
 
     /*
-     * Configuration
+     * 配置
      */
     .enable(write_enable),
     .abort(write_abort)

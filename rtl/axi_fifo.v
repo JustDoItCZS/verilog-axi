@@ -22,153 +22,158 @@ THE SOFTWARE.
 
 */
 
-// Language: Verilog 2001
+// 语言: Verilog 2001
 
 `resetall
 `timescale 1ns / 1ps
 `default_nettype none
 
 /*
- * AXI4 FIFO
+ * AXI4 FIFO 模块
+ *
+ * 模块目录
+ * 1) 写通道由 axi_fifo_wr 负责：AW/W 可选缓存后再发往下游，B 返回直通/对齐。
+ * 2) 读通道由 axi_fifo_rd 负责：AR 可选延迟，R 通道进入 FIFO 后回给上游。
+ * 3) 该顶层主要做读写子模块拼接，不额外引入状态机。
  */
 module axi_fifo #
 (
-    // Width of data bus in bits
+    // 数据总线位宽
     parameter DATA_WIDTH = 32,
-    // Width of address bus in bits
+    // 地址总线位宽
     parameter ADDR_WIDTH = 32,
-    // Width of wstrb (width of data bus in words)
+    // WSTRB 位宽（按字节）
     parameter STRB_WIDTH = (DATA_WIDTH/8),
-    // Width of ID signal
+    // ID 信号位宽
     parameter ID_WIDTH = 8,
-    // Propagate awuser signal
+    // 是否透传 AWUSER 信号
     parameter AWUSER_ENABLE = 0,
-    // Width of awuser signal
+    // AWUSER 信号位宽
     parameter AWUSER_WIDTH = 1,
-    // Propagate wuser signal
+    // 是否透传 WUSER 信号
     parameter WUSER_ENABLE = 0,
-    // Width of wuser signal
+    // WUSER 信号位宽
     parameter WUSER_WIDTH = 1,
-    // Propagate buser signal
+    // 是否透传 BUSER 信号
     parameter BUSER_ENABLE = 0,
-    // Width of buser signal
+    // BUSER 信号位宽
     parameter BUSER_WIDTH = 1,
-    // Propagate aruser signal
+    // 是否透传 ARUSER 信号
     parameter ARUSER_ENABLE = 0,
-    // Width of aruser signal
+    // ARUSER 信号位宽
     parameter ARUSER_WIDTH = 1,
-    // Propagate ruser signal
+    // 是否透传 RUSER 信号
     parameter RUSER_ENABLE = 0,
-    // Width of ruser signal
+    // RUSER 信号位宽
     parameter RUSER_WIDTH = 1,
-    // Write data FIFO depth (cycles)
+    // 写数据 FIFO 深度（拍）
     parameter WRITE_FIFO_DEPTH = 32,
-    // Read data FIFO depth (cycles)
+    // 读数据 FIFO 深度（拍）
     parameter READ_FIFO_DEPTH = 32,
-    // Hold write address until write data in FIFO, if possible
+    // 尽可能等待写数据进入 FIFO 后再放行写地址
     parameter WRITE_FIFO_DELAY = 0,
-    // Hold read address until space available in FIFO for data, if possible
+    // 尽可能等待 FIFO 有足够读返回空间后再放行读地址
     parameter READ_FIFO_DELAY = 0
 )
 (
-    input  wire                     clk,
-    input  wire                     rst,
+    input  wire                     clk, // 全局时钟。
+    input  wire                     rst, // 同步复位，高电平有效。
 
     /*
-     * AXI slave interface
+     * AXI 从接口
      */
-    input  wire [ID_WIDTH-1:0]      s_axi_awid,
-    input  wire [ADDR_WIDTH-1:0]    s_axi_awaddr,
-    input  wire [7:0]               s_axi_awlen,
-    input  wire [2:0]               s_axi_awsize,
-    input  wire [1:0]               s_axi_awburst,
-    input  wire                     s_axi_awlock,
-    input  wire [3:0]               s_axi_awcache,
-    input  wire [2:0]               s_axi_awprot,
-    input  wire [3:0]               s_axi_awqos,
-    input  wire [3:0]               s_axi_awregion,
-    input  wire [AWUSER_WIDTH-1:0]  s_axi_awuser,
-    input  wire                     s_axi_awvalid,
-    output wire                     s_axi_awready,
-    input  wire [DATA_WIDTH-1:0]    s_axi_wdata,
-    input  wire [STRB_WIDTH-1:0]    s_axi_wstrb,
-    input  wire                     s_axi_wlast,
-    input  wire [WUSER_WIDTH-1:0]   s_axi_wuser,
-    input  wire                     s_axi_wvalid,
-    output wire                     s_axi_wready,
-    output wire [ID_WIDTH-1:0]      s_axi_bid,
-    output wire [1:0]               s_axi_bresp,
-    output wire [BUSER_WIDTH-1:0]   s_axi_buser,
-    output wire                     s_axi_bvalid,
-    input  wire                     s_axi_bready,
-    input  wire [ID_WIDTH-1:0]      s_axi_arid,
-    input  wire [ADDR_WIDTH-1:0]    s_axi_araddr,
-    input  wire [7:0]               s_axi_arlen,
-    input  wire [2:0]               s_axi_arsize,
-    input  wire [1:0]               s_axi_arburst,
-    input  wire                     s_axi_arlock,
-    input  wire [3:0]               s_axi_arcache,
-    input  wire [2:0]               s_axi_arprot,
-    input  wire [3:0]               s_axi_arqos,
-    input  wire [3:0]               s_axi_arregion,
-    input  wire [ARUSER_WIDTH-1:0]  s_axi_aruser,
-    input  wire                     s_axi_arvalid,
-    output wire                     s_axi_arready,
-    output wire [ID_WIDTH-1:0]      s_axi_rid,
-    output wire [DATA_WIDTH-1:0]    s_axi_rdata,
-    output wire [1:0]               s_axi_rresp,
-    output wire                     s_axi_rlast,
-    output wire [RUSER_WIDTH-1:0]   s_axi_ruser,
-    output wire                     s_axi_rvalid,
-    input  wire                     s_axi_rready,
+    input  wire [ID_WIDTH-1:0]      s_axi_awid, // 上游写地址 ID。
+    input  wire [ADDR_WIDTH-1:0]    s_axi_awaddr, // 上游写地址。
+    input  wire [7:0]               s_axi_awlen, // 上游写突发长度。
+    input  wire [2:0]               s_axi_awsize, // 上游写突发 beat 大小。
+    input  wire [1:0]               s_axi_awburst, // 上游写突发类型。
+    input  wire                     s_axi_awlock, // 上游写锁属性。
+    input  wire [3:0]               s_axi_awcache, // 上游写 cache 属性。
+    input  wire [2:0]               s_axi_awprot, // 上游写保护属性。
+    input  wire [3:0]               s_axi_awqos, // 上游写 QoS。
+    input  wire [3:0]               s_axi_awregion, // 上游写 region。
+    input  wire [AWUSER_WIDTH-1:0]  s_axi_awuser, // 上游写地址 user sideband。
+    input  wire                     s_axi_awvalid, // 上游写地址有效。
+    output wire                     s_axi_awready, // FIFO 可接收写地址。
+    input  wire [DATA_WIDTH-1:0]    s_axi_wdata, // 上游写数据。
+    input  wire [STRB_WIDTH-1:0]    s_axi_wstrb, // 上游写字节使能。
+    input  wire                     s_axi_wlast, // 上游写突发最后一拍。
+    input  wire [WUSER_WIDTH-1:0]   s_axi_wuser, // 上游写数据 user sideband。
+    input  wire                     s_axi_wvalid, // 上游写数据有效。
+    output wire                     s_axi_wready, // FIFO 可接收写数据。
+    output wire [ID_WIDTH-1:0]      s_axi_bid, // 返回给上游的写响应 ID。
+    output wire [1:0]               s_axi_bresp, // 返回给上游的写响应状态。
+    output wire [BUSER_WIDTH-1:0]   s_axi_buser, // 返回给上游的写响应 user。
+    output wire                     s_axi_bvalid, // 返回给上游的写响应有效。
+    input  wire                     s_axi_bready, // 上游接受写响应。
+    input  wire [ID_WIDTH-1:0]      s_axi_arid, // 上游读地址 ID。
+    input  wire [ADDR_WIDTH-1:0]    s_axi_araddr, // 上游读地址。
+    input  wire [7:0]               s_axi_arlen, // 上游读突发长度。
+    input  wire [2:0]               s_axi_arsize, // 上游读突发 beat 大小。
+    input  wire [1:0]               s_axi_arburst, // 上游读突发类型。
+    input  wire                     s_axi_arlock, // 上游读锁属性。
+    input  wire [3:0]               s_axi_arcache, // 上游读 cache 属性。
+    input  wire [2:0]               s_axi_arprot, // 上游读保护属性。
+    input  wire [3:0]               s_axi_arqos, // 上游读 QoS。
+    input  wire [3:0]               s_axi_arregion, // 上游读 region。
+    input  wire [ARUSER_WIDTH-1:0]  s_axi_aruser, // 上游读地址 user sideband。
+    input  wire                     s_axi_arvalid, // 上游读地址有效。
+    output wire                     s_axi_arready, // FIFO 可接收读地址。
+    output wire [ID_WIDTH-1:0]      s_axi_rid, // 返回给上游的读数据 ID。
+    output wire [DATA_WIDTH-1:0]    s_axi_rdata, // 返回给上游的读数据。
+    output wire [1:0]               s_axi_rresp, // 返回给上游的读响应状态。
+    output wire                     s_axi_rlast, // 返回给上游的读突发最后一拍。
+    output wire [RUSER_WIDTH-1:0]   s_axi_ruser, // 返回给上游的读数据 user。
+    output wire                     s_axi_rvalid, // 返回给上游的读数据有效。
+    input  wire                     s_axi_rready, // 上游接受读数据。
 
     /*
-     * AXI master interface
+     * AXI 主接口
      */
-    output wire [ID_WIDTH-1:0]      m_axi_awid,
-    output wire [ADDR_WIDTH-1:0]    m_axi_awaddr,
-    output wire [7:0]               m_axi_awlen,
-    output wire [2:0]               m_axi_awsize,
-    output wire [1:0]               m_axi_awburst,
-    output wire                     m_axi_awlock,
-    output wire [3:0]               m_axi_awcache,
-    output wire [2:0]               m_axi_awprot,
-    output wire [3:0]               m_axi_awqos,
-    output wire [3:0]               m_axi_awregion,
-    output wire [AWUSER_WIDTH-1:0]  m_axi_awuser,
-    output wire                     m_axi_awvalid,
-    input  wire                     m_axi_awready,
-    output wire [DATA_WIDTH-1:0]    m_axi_wdata,
-    output wire [STRB_WIDTH-1:0]    m_axi_wstrb,
-    output wire                     m_axi_wlast,
-    output wire [WUSER_WIDTH-1:0]   m_axi_wuser,
-    output wire                     m_axi_wvalid,
-    input  wire                     m_axi_wready,
-    input  wire [ID_WIDTH-1:0]      m_axi_bid,
-    input  wire [1:0]               m_axi_bresp,
-    input  wire [BUSER_WIDTH-1:0]   m_axi_buser,
-    input  wire                     m_axi_bvalid,
-    output wire                     m_axi_bready,
-    output wire [ID_WIDTH-1:0]      m_axi_arid,
-    output wire [ADDR_WIDTH-1:0]    m_axi_araddr,
-    output wire [7:0]               m_axi_arlen,
-    output wire [2:0]               m_axi_arsize,
-    output wire [1:0]               m_axi_arburst,
-    output wire                     m_axi_arlock,
-    output wire [3:0]               m_axi_arcache,
-    output wire [2:0]               m_axi_arprot,
-    output wire [3:0]               m_axi_arqos,
-    output wire [3:0]               m_axi_arregion,
-    output wire [ARUSER_WIDTH-1:0]  m_axi_aruser,
-    output wire                     m_axi_arvalid,
-    input  wire                     m_axi_arready,
-    input  wire [ID_WIDTH-1:0]      m_axi_rid,
-    input  wire [DATA_WIDTH-1:0]    m_axi_rdata,
-    input  wire [1:0]               m_axi_rresp,
-    input  wire                     m_axi_rlast,
-    input  wire [RUSER_WIDTH-1:0]   m_axi_ruser,
-    input  wire                     m_axi_rvalid,
-    output wire                     m_axi_rready
+    output wire [ID_WIDTH-1:0]      m_axi_awid, // 下游写地址 ID。
+    output wire [ADDR_WIDTH-1:0]    m_axi_awaddr, // 下游写地址。
+    output wire [7:0]               m_axi_awlen, // 下游写突发长度。
+    output wire [2:0]               m_axi_awsize, // 下游写突发 beat 大小。
+    output wire [1:0]               m_axi_awburst, // 下游写突发类型。
+    output wire                     m_axi_awlock, // 下游写锁属性。
+    output wire [3:0]               m_axi_awcache, // 下游写 cache 属性。
+    output wire [2:0]               m_axi_awprot, // 下游写保护属性。
+    output wire [3:0]               m_axi_awqos, // 下游写 QoS。
+    output wire [3:0]               m_axi_awregion, // 下游写 region。
+    output wire [AWUSER_WIDTH-1:0]  m_axi_awuser, // 下游写地址 user sideband。
+    output wire                     m_axi_awvalid, // 下游写地址有效。
+    input  wire                     m_axi_awready, // 下游可接收写地址。
+    output wire [DATA_WIDTH-1:0]    m_axi_wdata, // 下游写数据。
+    output wire [STRB_WIDTH-1:0]    m_axi_wstrb, // 下游写字节使能。
+    output wire                     m_axi_wlast, // 下游写突发最后一拍。
+    output wire [WUSER_WIDTH-1:0]   m_axi_wuser, // 下游写数据 user sideband。
+    output wire                     m_axi_wvalid, // 下游写数据有效。
+    input  wire                     m_axi_wready, // 下游可接收写数据。
+    input  wire [ID_WIDTH-1:0]      m_axi_bid, // 下游写响应 ID。
+    input  wire [1:0]               m_axi_bresp, // 下游写响应状态。
+    input  wire [BUSER_WIDTH-1:0]   m_axi_buser, // 下游写响应 user。
+    input  wire                     m_axi_bvalid, // 下游写响应有效。
+    output wire                     m_axi_bready, // FIFO 接受下游写响应。
+    output wire [ID_WIDTH-1:0]      m_axi_arid, // 下游读地址 ID。
+    output wire [ADDR_WIDTH-1:0]    m_axi_araddr, // 下游读地址。
+    output wire [7:0]               m_axi_arlen, // 下游读突发长度。
+    output wire [2:0]               m_axi_arsize, // 下游读突发 beat 大小。
+    output wire [1:0]               m_axi_arburst, // 下游读突发类型。
+    output wire                     m_axi_arlock, // 下游读锁属性。
+    output wire [3:0]               m_axi_arcache, // 下游读 cache 属性。
+    output wire [2:0]               m_axi_arprot, // 下游读保护属性。
+    output wire [3:0]               m_axi_arqos, // 下游读 QoS。
+    output wire [3:0]               m_axi_arregion, // 下游读 region。
+    output wire [ARUSER_WIDTH-1:0]  m_axi_aruser, // 下游读地址 user sideband。
+    output wire                     m_axi_arvalid, // 下游读地址有效。
+    input  wire                     m_axi_arready, // 下游可接收读地址。
+    input  wire [ID_WIDTH-1:0]      m_axi_rid, // 下游读数据 ID。
+    input  wire [DATA_WIDTH-1:0]    m_axi_rdata, // 下游读数据。
+    input  wire [1:0]               m_axi_rresp, // 下游读响应状态。
+    input  wire                     m_axi_rlast, // 下游读突发最后一拍。
+    input  wire [RUSER_WIDTH-1:0]   m_axi_ruser, // 下游读数据 user。
+    input  wire                     m_axi_rvalid, // 下游读数据有效。
+    output wire                     m_axi_rready // FIFO 接受下游读数据。
 );
 
 axi_fifo_wr #(
@@ -190,7 +195,7 @@ axi_fifo_wr_inst (
     .rst(rst),
 
     /*
-     * AXI slave interface
+     * AXI 从接口
      */
     .s_axi_awid(s_axi_awid),
     .s_axi_awaddr(s_axi_awaddr),
@@ -218,7 +223,7 @@ axi_fifo_wr_inst (
     .s_axi_bready(s_axi_bready),
 
     /*
-     * AXI master interface
+     * AXI 主接口
      */
     .m_axi_awid(m_axi_awid),
     .m_axi_awaddr(m_axi_awaddr),
@@ -263,7 +268,7 @@ axi_fifo_rd_inst (
     .rst(rst),
 
     /*
-     * AXI slave interface
+     * AXI 从接口
      */
     .s_axi_arid(s_axi_arid),
     .s_axi_araddr(s_axi_araddr),
@@ -287,7 +292,7 @@ axi_fifo_rd_inst (
     .s_axi_rready(s_axi_rready),
 
     /*
-     * AXI master interface
+     * AXI 主接口
      */
     .m_axi_arid(m_axi_arid),
     .m_axi_araddr(m_axi_araddr),

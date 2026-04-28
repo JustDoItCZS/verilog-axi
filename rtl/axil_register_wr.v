@@ -22,90 +22,98 @@ THE SOFTWARE.
 
 */
 
-// Language: Verilog 2001
+// 语言: Verilog 2001
 
 `resetall
 `timescale 1ns / 1ps
 `default_nettype none
 
 /*
- * AXI4 lite register (write)
+ * AXI4-Lite 寄存器切片（写通道）
+ *
+ * 模块目录
+ * 1) 输入从侧写通道（AW/W/B），输出主侧写通道。
+ * 2) 每个通道可独立选择缓冲模式：
+ *    - 旁路
+ *    - 简单一级寄存（可能产生气泡）
+ *    - skid buffer（背压切换时无气泡）
+ * 3) 每个通道都包含本地握手控制和载荷寄存器。
  */
 module axil_register_wr #
 (
-    // Width of data bus in bits
+    // 数据总线位宽
     parameter DATA_WIDTH = 32,
-    // Width of address bus in bits
+    // 地址总线位宽
     parameter ADDR_WIDTH = 32,
-    // Width of wstrb (width of data bus in words)
+    // WSTRB 位宽（按字节）
     parameter STRB_WIDTH = (DATA_WIDTH/8),
-    // AW channel register type
-    // 0 to bypass, 1 for simple buffer
+    // AW 通道寄存类型
+    // 0 表示旁路，1 表示简单一级缓冲
     parameter AW_REG_TYPE = 1,
-    // W channel register type
-    // 0 to bypass, 1 for simple buffer
+    // W 通道寄存类型
+    // 0 表示旁路，1 表示简单一级缓冲
     parameter W_REG_TYPE = 1,
-    // B channel register type
-    // 0 to bypass, 1 for simple buffer
+    // B 通道寄存类型
+    // 0 表示旁路，1 表示简单一级缓冲
     parameter B_REG_TYPE = 1
 )
 (
-    input  wire                     clk,
-    input  wire                     rst,
+    input  wire                     clk,            // 写通道缓冲状态时钟。
+    input  wire                     rst,            // 写通道寄存状态同步复位。
 
     /*
-     * AXI lite slave interface
+     * AXI-Lite 从接口
      */
-    input  wire [ADDR_WIDTH-1:0]    s_axil_awaddr,
-    input  wire [2:0]               s_axil_awprot,
-    input  wire                     s_axil_awvalid,
-    output wire                     s_axil_awready,
-    input  wire [DATA_WIDTH-1:0]    s_axil_wdata,
-    input  wire [STRB_WIDTH-1:0]    s_axil_wstrb,
-    input  wire                     s_axil_wvalid,
-    output wire                     s_axil_wready,
-    output wire [1:0]               s_axil_bresp,
-    output wire                     s_axil_bvalid,
-    input  wire                     s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]    s_axil_awaddr,  // 从侧输入 AW 地址。
+    input  wire [2:0]               s_axil_awprot,  // 从侧输入 AW 保护属性。
+    input  wire                     s_axil_awvalid, // 从侧输入 AW 有效。
+    output wire                     s_axil_awready, // 从侧输出 AW 就绪（经可选缓冲后）。
+    input  wire [DATA_WIDTH-1:0]    s_axil_wdata,   // 从侧输入 W 数据。
+    input  wire [STRB_WIDTH-1:0]    s_axil_wstrb,   // 从侧输入 W 字节使能。
+    input  wire                     s_axil_wvalid,  // 从侧输入 W 有效。
+    output wire                     s_axil_wready,  // 从侧输出 W 就绪（经可选缓冲后）。
+    output wire [1:0]               s_axil_bresp,   // 从侧输出 B 响应（来自下游）。
+    output wire                     s_axil_bvalid,  // 从侧输出 B 有效（来自下游）。
+    input  wire                     s_axil_bready,  // 从侧输入 B 就绪。
 
     /*
-     * AXI lite master interface
+     * AXI-Lite 主接口
      */
-    output wire [ADDR_WIDTH-1:0]    m_axil_awaddr,
-    output wire [2:0]               m_axil_awprot,
-    output wire                     m_axil_awvalid,
-    input  wire                     m_axil_awready,
-    output wire [DATA_WIDTH-1:0]    m_axil_wdata,
-    output wire [STRB_WIDTH-1:0]    m_axil_wstrb,
-    output wire                     m_axil_wvalid,
-    input  wire                     m_axil_wready,
-    input  wire [1:0]               m_axil_bresp,
-    input  wire                     m_axil_bvalid,
-    output wire                     m_axil_bready
+    output wire [ADDR_WIDTH-1:0]    m_axil_awaddr,  // 主侧输出 AW 地址（发往下游目标）。
+    output wire [2:0]               m_axil_awprot,  // 主侧输出 AW 保护属性。
+    output wire                     m_axil_awvalid, // 主侧输出 AW 有效（经所选缓冲后）。
+    input  wire                     m_axil_awready, // 主侧输入 AW 就绪（来自下游目标）。
+    output wire [DATA_WIDTH-1:0]    m_axil_wdata,   // 主侧输出 W 数据。
+    output wire [STRB_WIDTH-1:0]    m_axil_wstrb,   // 主侧输出 W 字节使能。
+    output wire                     m_axil_wvalid,  // 主侧输出 W 有效（经所选缓冲后）。
+    input  wire                     m_axil_wready,  // 主侧输入 W 就绪（来自下游目标）。
+    input  wire [1:0]               m_axil_bresp,   // 主侧输入 B 响应（来自下游目标）。
+    input  wire                     m_axil_bvalid,  // 主侧输入 B 有效（来自下游目标）。
+    output wire                     m_axil_bready   // 主侧输出 B 就绪（经所选缓冲后）。
 );
 
 generate
 
-// AW channel
+// AW 通道
 
 if (AW_REG_TYPE > 1) begin
-// skid buffer, no bubble cycles
+// skid buffer，无气泡周期
 
-// datapath registers
-reg                    s_axil_awready_reg = 1'b0;
+// 数据通路寄存器
+reg                    s_axil_awready_reg = 1'b0; // 指向从侧的本地 ready，由 s_axil_awready_early 驱动。
 
-reg [ADDR_WIDTH-1:0]   m_axil_awaddr_reg   = {ADDR_WIDTH{1'b0}};
-reg [2:0]              m_axil_awprot_reg   = 3'd0;
-reg                    m_axil_awvalid_reg  = 1'b0, m_axil_awvalid_next;
+reg [ADDR_WIDTH-1:0]   m_axil_awaddr_reg   = {ADDR_WIDTH{1'b0}}; // 发往主侧的主 AW 数据寄存器。
+reg [2:0]              m_axil_awprot_reg   = 3'd0; // 与主 AW 数据对齐的保护属性寄存器。
+reg                    m_axil_awvalid_reg  = 1'b0, m_axil_awvalid_next; // 主 AW valid 当前状态与下一状态。
 
-reg [ADDR_WIDTH-1:0]   temp_m_axil_awaddr_reg   = {ADDR_WIDTH{1'b0}};
-reg [2:0]              temp_m_axil_awprot_reg   = 3'd0;
-reg                    temp_m_axil_awvalid_reg  = 1'b0, temp_m_axil_awvalid_next;
+reg [ADDR_WIDTH-1:0]   temp_m_axil_awaddr_reg   = {ADDR_WIDTH{1'b0}}; // 输出级阻塞时临时缓存的 AW 数据。
+reg [2:0]              temp_m_axil_awprot_reg   = 3'd0; // 临时缓存 AW 保护属性。
+reg                    temp_m_axil_awvalid_reg  = 1'b0, temp_m_axil_awvalid_next; // 临时缓存 AW valid 当前状态与下一状态。
 
-// datapath control
-reg store_axil_aw_input_to_output;
-reg store_axil_aw_input_to_temp;
-reg store_axil_aw_temp_to_output;
+// 数据通路控制
+reg store_axil_aw_input_to_output; // 置位时把输入 AW 写入主输出寄存器。
+reg store_axil_aw_input_to_temp; // 置位时在下游阻塞时把输入 AW 写入临时寄存器。
+reg store_axil_aw_temp_to_output; // 置位时把临时 AW 提升到主输出寄存器。
 
 assign s_axil_awready  = s_axil_awready_reg;
 
@@ -113,11 +121,11 @@ assign m_axil_awaddr   = m_axil_awaddr_reg;
 assign m_axil_awprot   = m_axil_awprot_reg;
 assign m_axil_awvalid  = m_axil_awvalid_reg;
 
-// enable ready input next cycle if output is ready or the temp reg will not be filled on the next cycle (output reg empty or no input)
-wire s_axil_awready_early = m_axil_awready | (~temp_m_axil_awvalid_reg & (~m_axil_awvalid_reg | ~s_axil_awvalid));
+// 下拍 ready 预判：当输出可接收，或下拍临时寄存器不会被占用时拉高
+wire s_axil_awready_early = m_axil_awready | (~temp_m_axil_awvalid_reg & (~m_axil_awvalid_reg | ~s_axil_awvalid)); // 组合前瞻 ready，避免气泡周期。
 
 always @* begin
-    // transfer sink ready state to source
+    // 将下游就绪关系映射到上游
     m_axil_awvalid_next = m_axil_awvalid_reg;
     temp_m_axil_awvalid_next = temp_m_axil_awvalid_reg;
 
@@ -126,18 +134,18 @@ always @* begin
     store_axil_aw_temp_to_output = 1'b0;
 
     if (s_axil_awready_reg) begin
-        // input is ready
+        // 当前允许接收输入
         if (m_axil_awready | ~m_axil_awvalid_reg) begin
-            // output is ready or currently not valid, transfer data to output
+            // 输出可接收，或当前输出无效：输入直写主输出
             m_axil_awvalid_next = s_axil_awvalid;
             store_axil_aw_input_to_output = 1'b1;
         end else begin
-            // output is not ready, store input in temp
+            // 输出阻塞：输入写入临时寄存器
             temp_m_axil_awvalid_next = s_axil_awvalid;
             store_axil_aw_input_to_temp = 1'b1;
         end
     end else if (m_axil_awready) begin
-        // input is not ready, but output is ready
+        // 当前不接收新输入，但输出可接收：临时寄存器回放到主输出
         m_axil_awvalid_next = temp_m_axil_awvalid_reg;
         temp_m_axil_awvalid_next = 1'b0;
         store_axil_aw_temp_to_output = 1'b1;
@@ -155,7 +163,7 @@ always @(posedge clk) begin
         temp_m_axil_awvalid_reg <= temp_m_axil_awvalid_next;
     end
 
-    // datapath
+    // 数据通路寄存
     if (store_axil_aw_input_to_output) begin
         m_axil_awaddr_reg <= s_axil_awaddr;
         m_axil_awprot_reg <= s_axil_awprot;
@@ -171,17 +179,17 @@ always @(posedge clk) begin
 end
 
 end else if (AW_REG_TYPE == 1) begin
-// simple register, inserts bubble cycles
+// 简单寄存模式，会引入气泡周期
 
-// datapath registers
-reg                    s_axil_awready_reg = 1'b0;
+// 数据通路寄存器
+reg                    s_axil_awready_reg = 1'b0; // 指向从侧的本地 ready，简单输出槽空闲时拉高。
 
-reg [ADDR_WIDTH-1:0]   m_axil_awaddr_reg   = {ADDR_WIDTH{1'b0}};
-reg [2:0]              m_axil_awprot_reg   = 3'd0;
-reg                    m_axil_awvalid_reg  = 1'b0, m_axil_awvalid_next;
+reg [ADDR_WIDTH-1:0]   m_axil_awaddr_reg   = {ADDR_WIDTH{1'b0}}; // 单级 AW 数据寄存器。
+reg [2:0]              m_axil_awprot_reg   = 3'd0; // 单级 AW 保护属性寄存器。
+reg                    m_axil_awvalid_reg  = 1'b0, m_axil_awvalid_next; // 单级 AW valid 当前状态与下一状态。
 
-// datapath control
-reg store_axil_aw_input_to_output;
+// 数据通路控制
+reg store_axil_aw_input_to_output; // 置位时把接收的从侧 AW 装入输出寄存器。
 
 assign s_axil_awready  = s_axil_awready_reg;
 
@@ -189,11 +197,11 @@ assign m_axil_awaddr   = m_axil_awaddr_reg;
 assign m_axil_awprot   = m_axil_awprot_reg;
 assign m_axil_awvalid  = m_axil_awvalid_reg;
 
-// enable ready input next cycle if output buffer will be empty
-wire s_axil_awready_early = !m_axil_awvalid_next;
+// 下拍 ready 预判：输出寄存器为空或将为空时拉高
+wire s_axil_awready_early = !m_axil_awvalid_next; // 输出寄存器为空（或将为空）时，下拍可接收。
 
 always @* begin
-    // transfer sink ready state to source
+    // 将下游就绪关系映射到上游
     m_axil_awvalid_next = m_axil_awvalid_reg;
 
     store_axil_aw_input_to_output = 1'b0;
@@ -215,7 +223,7 @@ always @(posedge clk) begin
         m_axil_awvalid_reg <= m_axil_awvalid_next;
     end
 
-    // datapath
+    // 数据通路寄存
     if (store_axil_aw_input_to_output) begin
         m_axil_awaddr_reg <= s_axil_awaddr;
         m_axil_awprot_reg <= s_axil_awprot;
@@ -224,7 +232,7 @@ end
 
 end else begin
 
-    // bypass AW channel
+    // AW 通道旁路
     assign m_axil_awaddr = s_axil_awaddr;
     assign m_axil_awprot = s_axil_awprot;
     assign m_axil_awvalid = s_axil_awvalid;
@@ -232,26 +240,26 @@ end else begin
 
 end
 
-// W channel
+// W 通道
 
 if (W_REG_TYPE > 1) begin
-// skid buffer, no bubble cycles
+// skid buffer，无气泡周期
 
-// datapath registers
-reg                   s_axil_wready_reg = 1'b0;
+// 数据通路寄存器
+reg                   s_axil_wready_reg = 1'b0; // 指向从侧 W 通道的本地 ready。
 
-reg [DATA_WIDTH-1:0]  m_axil_wdata_reg  = {DATA_WIDTH{1'b0}};
-reg [STRB_WIDTH-1:0]  m_axil_wstrb_reg  = {STRB_WIDTH{1'b0}};
-reg                   m_axil_wvalid_reg = 1'b0, m_axil_wvalid_next;
+reg [DATA_WIDTH-1:0]  m_axil_wdata_reg  = {DATA_WIDTH{1'b0}}; // 发往主侧的主 W 数据寄存器。
+reg [STRB_WIDTH-1:0]  m_axil_wstrb_reg  = {STRB_WIDTH{1'b0}}; // 主 W 字节使能寄存器。
+reg                   m_axil_wvalid_reg = 1'b0, m_axil_wvalid_next; // 主 W valid 当前状态与下一状态。
 
-reg [DATA_WIDTH-1:0]  temp_m_axil_wdata_reg  = {DATA_WIDTH{1'b0}};
-reg [STRB_WIDTH-1:0]  temp_m_axil_wstrb_reg  = {STRB_WIDTH{1'b0}};
-reg                   temp_m_axil_wvalid_reg = 1'b0, temp_m_axil_wvalid_next;
+reg [DATA_WIDTH-1:0]  temp_m_axil_wdata_reg  = {DATA_WIDTH{1'b0}}; // 主输出阻塞时临时缓存的 W 数据。
+reg [STRB_WIDTH-1:0]  temp_m_axil_wstrb_reg  = {STRB_WIDTH{1'b0}}; // 主输出阻塞时临时缓存的 W 字节使能。
+reg                   temp_m_axil_wvalid_reg = 1'b0, temp_m_axil_wvalid_next; // 临时缓存 W valid 当前状态与下一状态。
 
-// datapath control
-reg store_axil_w_input_to_output;
-reg store_axil_w_input_to_temp;
-reg store_axil_w_temp_to_output;
+// 数据通路控制
+reg store_axil_w_input_to_output; // 置位时把输入 W 写入主输出寄存器。
+reg store_axil_w_input_to_temp; // 置位时把输入 W 写入临时寄存器。
+reg store_axil_w_temp_to_output; // 置位时把临时 W 回放到主输出寄存器。
 
 assign s_axil_wready = s_axil_wready_reg;
 
@@ -259,11 +267,11 @@ assign m_axil_wdata  = m_axil_wdata_reg;
 assign m_axil_wstrb  = m_axil_wstrb_reg;
 assign m_axil_wvalid = m_axil_wvalid_reg;
 
-// enable ready input next cycle if output is ready or the temp reg will not be filled on the next cycle (output reg empty or no input)
-wire s_axil_wready_early = m_axil_wready | (~temp_m_axil_wvalid_reg & (~m_axil_wvalid_reg | ~s_axil_wvalid));
+// 下拍 ready 预判：当输出可接收，或下拍临时寄存器不会被占用时拉高
+wire s_axil_wready_early = m_axil_wready | (~temp_m_axil_wvalid_reg & (~m_axil_wvalid_reg | ~s_axil_wvalid)); // 前瞻 ready，保持无气泡运行。
 
 always @* begin
-    // transfer sink ready state to source
+    // 将下游就绪关系映射到上游
     m_axil_wvalid_next = m_axil_wvalid_reg;
     temp_m_axil_wvalid_next = temp_m_axil_wvalid_reg;
 
@@ -272,18 +280,18 @@ always @* begin
     store_axil_w_temp_to_output = 1'b0;
 
     if (s_axil_wready_reg) begin
-        // input is ready
+        // 当前允许接收输入
         if (m_axil_wready | ~m_axil_wvalid_reg) begin
-            // output is ready or currently not valid, transfer data to output
+            // 输出可接收，或当前输出无效：输入直写主输出
             m_axil_wvalid_next = s_axil_wvalid;
             store_axil_w_input_to_output = 1'b1;
         end else begin
-            // output is not ready, store input in temp
+            // 输出阻塞：输入写入临时寄存器
             temp_m_axil_wvalid_next = s_axil_wvalid;
             store_axil_w_input_to_temp = 1'b1;
         end
     end else if (m_axil_wready) begin
-        // input is not ready, but output is ready
+        // 当前不接收新输入，但输出可接收：临时寄存器回放到主输出
         m_axil_wvalid_next = temp_m_axil_wvalid_reg;
         temp_m_axil_wvalid_next = 1'b0;
         store_axil_w_temp_to_output = 1'b1;
@@ -301,7 +309,7 @@ always @(posedge clk) begin
         temp_m_axil_wvalid_reg <= temp_m_axil_wvalid_next;
     end
 
-    // datapath
+    // 数据通路寄存
     if (store_axil_w_input_to_output) begin
         m_axil_wdata_reg <= s_axil_wdata;
         m_axil_wstrb_reg <= s_axil_wstrb;
@@ -317,17 +325,17 @@ always @(posedge clk) begin
 end
 
 end else if (W_REG_TYPE == 1) begin
-// simple register, inserts bubble cycles
+// 简单寄存模式，会引入气泡周期
 
-// datapath registers
-reg                   s_axil_wready_reg = 1'b0;
+// 数据通路寄存器
+reg                   s_axil_wready_reg = 1'b0; // 指向从侧的本地 ready，简单输出槽可用时拉高。
 
-reg [DATA_WIDTH-1:0]  m_axil_wdata_reg  = {DATA_WIDTH{1'b0}};
-reg [STRB_WIDTH-1:0]  m_axil_wstrb_reg  = {STRB_WIDTH{1'b0}};
-reg                   m_axil_wvalid_reg = 1'b0, m_axil_wvalid_next;
+reg [DATA_WIDTH-1:0]  m_axil_wdata_reg  = {DATA_WIDTH{1'b0}}; // 单级 W 数据寄存器。
+reg [STRB_WIDTH-1:0]  m_axil_wstrb_reg  = {STRB_WIDTH{1'b0}}; // 单级 W 字节使能寄存器。
+reg                   m_axil_wvalid_reg = 1'b0, m_axil_wvalid_next; // 单级 W valid 当前状态与下一状态。
 
-// datapath control
-reg store_axil_w_input_to_output;
+// 数据通路控制
+reg store_axil_w_input_to_output; // 置位时把接收的从侧 W 装入输出寄存器。
 
 assign s_axil_wready = s_axil_wready_reg;
 
@@ -335,11 +343,11 @@ assign m_axil_wdata  = m_axil_wdata_reg;
 assign m_axil_wstrb  = m_axil_wstrb_reg;
 assign m_axil_wvalid = m_axil_wvalid_reg;
 
-// enable ready input next cycle if output buffer will be empty
-wire s_axil_wready_early = !m_axil_wvalid_next;
+// 下拍 ready 预判：输出寄存器为空或将为空时拉高
+wire s_axil_wready_early = !m_axil_wvalid_next; // 输出寄存器为空（或将为空）时，下拍可接收。
 
 always @* begin
-    // transfer sink ready state to source
+    // 将下游就绪关系映射到上游
     m_axil_wvalid_next = m_axil_wvalid_reg;
 
     store_axil_w_input_to_output = 1'b0;
@@ -361,7 +369,7 @@ always @(posedge clk) begin
         m_axil_wvalid_reg <= m_axil_wvalid_next;
     end
 
-    // datapath
+    // 数据通路寄存
     if (store_axil_w_input_to_output) begin
         m_axil_wdata_reg <= s_axil_wdata;
         m_axil_wstrb_reg <= s_axil_wstrb;
@@ -370,7 +378,7 @@ end
 
 end else begin
 
-    // bypass W channel
+    // W 通道旁路
     assign m_axil_wdata = s_axil_wdata;
     assign m_axil_wstrb = s_axil_wstrb;
     assign m_axil_wvalid = s_axil_wvalid;
@@ -378,35 +386,35 @@ end else begin
 
 end
 
-// B channel
+// B 通道
 
 if (B_REG_TYPE > 1) begin
-// skid buffer, no bubble cycles
+// skid buffer，无气泡周期
 
-// datapath registers
-reg                   m_axil_bready_reg = 1'b0;
+// 数据通路寄存器
+reg                   m_axil_bready_reg = 1'b0; // 指向主侧 B 通道的本地 ready。
 
-reg [1:0]             s_axil_bresp_reg  = 2'b0;
-reg                   s_axil_bvalid_reg = 1'b0, s_axil_bvalid_next;
+reg [1:0]             s_axil_bresp_reg  = 2'b0; // 发往从侧的主 B 响应寄存器。
+reg                   s_axil_bvalid_reg = 1'b0, s_axil_bvalid_next; // 主 B valid 当前状态与下一状态。
 
-reg [1:0]             temp_s_axil_bresp_reg  = 2'b0;
-reg                   temp_s_axil_bvalid_reg = 1'b0, temp_s_axil_bvalid_next;
+reg [1:0]             temp_s_axil_bresp_reg  = 2'b0; // 从侧阻塞时临时缓存的 B 响应。
+reg                   temp_s_axil_bvalid_reg = 1'b0, temp_s_axil_bvalid_next; // 临时缓存 B valid 当前状态与下一状态。
 
-// datapath control
-reg store_axil_b_input_to_output;
-reg store_axil_b_input_to_temp;
-reg store_axil_b_temp_to_output;
+// 数据通路控制
+reg store_axil_b_input_to_output; // 置位时把主侧输入 B 写入主输出寄存器。
+reg store_axil_b_input_to_temp; // 置位时把主侧输入 B 写入临时寄存器。
+reg store_axil_b_temp_to_output; // 置位时把临时 B 回放到主输出寄存器。
 
 assign m_axil_bready = m_axil_bready_reg;
 
 assign s_axil_bresp  = s_axil_bresp_reg;
 assign s_axil_bvalid = s_axil_bvalid_reg;
 
-// enable ready input next cycle if output is ready or the temp reg will not be filled on the next cycle (output reg empty or no input)
-wire m_axil_bready_early = s_axil_bready | (~temp_s_axil_bvalid_reg & (~s_axil_bvalid_reg | ~m_axil_bvalid));
+// 下拍 ready 预判：当输出可接收，或下拍临时寄存器不会被占用时拉高
+wire m_axil_bready_early = s_axil_bready | (~temp_s_axil_bvalid_reg & (~s_axil_bvalid_reg | ~m_axil_bvalid)); // 前瞻 ready，保持 B 通道无气泡。
 
 always @* begin
-    // transfer sink ready state to source
+    // 将下游就绪关系映射到上游
     s_axil_bvalid_next = s_axil_bvalid_reg;
     temp_s_axil_bvalid_next = temp_s_axil_bvalid_reg;
 
@@ -415,18 +423,18 @@ always @* begin
     store_axil_b_temp_to_output = 1'b0;
 
     if (m_axil_bready_reg) begin
-        // input is ready
+        // 当前允许接收输入
         if (s_axil_bready | ~s_axil_bvalid_reg) begin
-            // output is ready or currently not valid, transfer data to output
+            // 输出可接收，或当前输出无效：输入直写主输出
             s_axil_bvalid_next = m_axil_bvalid;
             store_axil_b_input_to_output = 1'b1;
         end else begin
-            // output is not ready, store input in temp
+            // 输出阻塞：输入写入临时寄存器
             temp_s_axil_bvalid_next = m_axil_bvalid;
             store_axil_b_input_to_temp = 1'b1;
         end
     end else if (s_axil_bready) begin
-        // input is not ready, but output is ready
+        // 当前不接收新输入，但输出可接收：临时寄存器回放到主输出
         s_axil_bvalid_next = temp_s_axil_bvalid_reg;
         temp_s_axil_bvalid_next = 1'b0;
         store_axil_b_temp_to_output = 1'b1;
@@ -444,7 +452,7 @@ always @(posedge clk) begin
         temp_s_axil_bvalid_reg <= temp_s_axil_bvalid_next;
     end
 
-    // datapath
+    // 数据通路寄存
     if (store_axil_b_input_to_output) begin
         s_axil_bresp_reg <= m_axil_bresp;
     end else if (store_axil_b_temp_to_output) begin
@@ -457,27 +465,27 @@ always @(posedge clk) begin
 end
 
 end else if (B_REG_TYPE == 1) begin
-// simple register, inserts bubble cycles
+// 简单寄存模式，会引入气泡周期
 
-// datapath registers
-reg                   m_axil_bready_reg = 1'b0;
+// 数据通路寄存器
+reg                   m_axil_bready_reg = 1'b0; // 简单模式下指向主侧 B 通道的本地 ready。
 
-reg [1:0]             s_axil_bresp_reg  = 2'b0;
-reg                   s_axil_bvalid_reg = 1'b0, s_axil_bvalid_next;
+reg [1:0]             s_axil_bresp_reg  = 2'b0; // 单级 B 响应寄存器。
+reg                   s_axil_bvalid_reg = 1'b0, s_axil_bvalid_next; // 单级 B valid 当前状态与下一状态。
 
-// datapath control
-reg store_axil_b_input_to_output;
+// 数据通路控制
+reg store_axil_b_input_to_output; // 置位时把接收的主侧 B 装入输出寄存器。
 
 assign m_axil_bready = m_axil_bready_reg;
 
 assign s_axil_bresp  = s_axil_bresp_reg;
 assign s_axil_bvalid = s_axil_bvalid_reg;
 
-// enable ready input next cycle if output buffer will be empty
-wire m_axil_bready_early = !s_axil_bvalid_next;
+// 下拍 ready 预判：输出寄存器为空或将为空时拉高
+wire m_axil_bready_early = !s_axil_bvalid_next; // 输出寄存器为空（或将为空）时，下拍可接收。
 
 always @* begin
-    // transfer sink ready state to source
+    // 将下游就绪关系映射到上游
     s_axil_bvalid_next = s_axil_bvalid_reg;
 
     store_axil_b_input_to_output = 1'b0;
@@ -499,7 +507,7 @@ always @(posedge clk) begin
         s_axil_bvalid_reg <= s_axil_bvalid_next;
     end
 
-    // datapath
+    // 数据通路寄存
     if (store_axil_b_input_to_output) begin
         s_axil_bresp_reg <= m_axil_bresp;
     end
@@ -507,7 +515,7 @@ end
 
 end else begin
 
-    // bypass B channel
+    // B 通道旁路
     assign s_axil_bresp = m_axil_bresp;
     assign s_axil_bvalid = m_axil_bvalid;
     assign m_axil_bready = s_axil_bready;

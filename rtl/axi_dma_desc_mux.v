@@ -22,99 +22,104 @@ THE SOFTWARE.
 
 */
 
-// Language: Verilog 2001
+// 语言: Verilog 2001
 
 `resetall
 `timescale 1ns / 1ps
 `default_nettype none
 
 /*
- * AXI DMA descriptor mux
+ * AXI DMA 描述符多路复用模块
+ *
+ * 模块目录
+ * 1) 多路 DMA 描述符输入仲裁为一路输出给 DMA 核心。
+ * 2) 通过在 tag 高位拼接端口号，实现完成状态按源端口回送。
+ * 3) 含输出一级+临时级缓冲，减小 backpressure 对上游的影响。
  */
 module axi_dma_desc_mux #
 (
-    // Number of ports
+    // 端口数量
     parameter PORTS = 2,
-    // AXI address width
+    // AXI 地址位宽
     parameter AXI_ADDR_WIDTH = 16,
-    // Propagate AXI stream tid signal
+    // 是否透传 AXI-Stream TID 信号
     parameter AXIS_ID_ENABLE = 0,
-    // AXI stream tid signal width
+    // AXI-Stream TID 信号位宽
     parameter AXIS_ID_WIDTH = 8,
-    // Propagate AXI stream tdest signal
+    // 是否透传 AXI-Stream TDEST 信号
     parameter AXIS_DEST_ENABLE = 0,
-    // AXI stream tdest signal width
+    // AXI-Stream TDEST 信号位宽
     parameter AXIS_DEST_WIDTH = 8,
-    // Propagate AXI stream tuser signal
+    // 是否透传 AXI-Stream TUSER 信号
     parameter AXIS_USER_ENABLE = 1,
-    // AXI stream tuser signal width
+    // AXI-Stream TUSER 信号位宽
     parameter AXIS_USER_WIDTH = 1,
-    // Length field width
+    // 长度字段位宽
     parameter LEN_WIDTH = 20,
-    // Input tag field width
+    // 输入 tag 字段位宽
     parameter S_TAG_WIDTH = 8,
-    // Output tag field width (towards CDMA module)
-    // Additional bits required for response routing
+    // 输出 tag 字段位宽（发往 DMA/CDMA 核心）
+    // 需要额外位用于状态回送路由
     parameter M_TAG_WIDTH = S_TAG_WIDTH+$clog2(PORTS),
-    // select round robin arbitration
+    // 是否选择轮询仲裁
     parameter ARB_TYPE_ROUND_ROBIN = 1,
-    // LSB priority selection
+    // 最低位优先级选择
     parameter ARB_LSB_HIGH_PRIORITY = 1
 )
 (
-    input  wire                             clk,
-    input  wire                             rst,
+    input  wire                             clk, // 模块时钟。
+    input  wire                             rst, // 同步复位，高电平有效。
 
     /*
-     * Descriptor output (to AXI DMA core)
+     * 描述符输出（到 AXI DMA 核心）
      */
-    output wire [AXI_ADDR_WIDTH-1:0]        m_axis_desc_addr,
-    output wire [LEN_WIDTH-1:0]             m_axis_desc_len,
-    output wire [M_TAG_WIDTH-1:0]           m_axis_desc_tag,
-    output wire [AXIS_ID_WIDTH-1:0]         m_axis_desc_id,
-    output wire [AXIS_DEST_WIDTH-1:0]       m_axis_desc_dest,
-    output wire [AXIS_USER_WIDTH-1:0]       m_axis_desc_user,
-    output wire                             m_axis_desc_valid,
-    input  wire                             m_axis_desc_ready,
+    output wire [AXI_ADDR_WIDTH-1:0]        m_axis_desc_addr, // 输出到 DMA 核心的描述符地址。
+    output wire [LEN_WIDTH-1:0]             m_axis_desc_len, // 输出到 DMA 核心的传输长度。
+    output wire [M_TAG_WIDTH-1:0]           m_axis_desc_tag, // 输出到 DMA 核心的扩展 tag(含源端口号)。
+    output wire [AXIS_ID_WIDTH-1:0]         m_axis_desc_id, // 输出到 DMA 核心的 AXIS ID sideband。
+    output wire [AXIS_DEST_WIDTH-1:0]       m_axis_desc_dest, // 输出到 DMA 核心的 AXIS DEST sideband。
+    output wire [AXIS_USER_WIDTH-1:0]       m_axis_desc_user, // 输出到 DMA 核心的 AXIS USER sideband。
+    output wire                             m_axis_desc_valid, // 输出描述符有效。
+    input  wire                             m_axis_desc_ready, // DMA 核心接收描述符 ready。
 
     /*
-     * Descriptor status input (from AXI DMA core)
+     * 描述符状态输入（来自 AXI DMA 核心）
      */
-    input  wire [LEN_WIDTH-1:0]             s_axis_desc_status_len,
-    input  wire [M_TAG_WIDTH-1:0]           s_axis_desc_status_tag,
-    input  wire [AXIS_ID_WIDTH-1:0]         s_axis_desc_status_id,
-    input  wire [AXIS_DEST_WIDTH-1:0]       s_axis_desc_status_dest,
-    input  wire [AXIS_USER_WIDTH-1:0]       s_axis_desc_status_user,
-    input  wire [3:0]                       s_axis_desc_status_error,
-    input  wire                             s_axis_desc_status_valid,
+    input  wire [LEN_WIDTH-1:0]             s_axis_desc_status_len, // DMA 核心返回的完成长度。
+    input  wire [M_TAG_WIDTH-1:0]           s_axis_desc_status_tag, // DMA 核心返回的扩展 tag(含源端口号)。
+    input  wire [AXIS_ID_WIDTH-1:0]         s_axis_desc_status_id, // DMA 核心返回的 AXIS ID sideband。
+    input  wire [AXIS_DEST_WIDTH-1:0]       s_axis_desc_status_dest, // DMA 核心返回的 AXIS DEST sideband。
+    input  wire [AXIS_USER_WIDTH-1:0]       s_axis_desc_status_user, // DMA 核心返回的 AXIS USER sideband。
+    input  wire [3:0]                       s_axis_desc_status_error, // DMA 核心返回的错误码。
+    input  wire                             s_axis_desc_status_valid, // DMA 核心返回状态有效。
 
     /*
-     * Descriptor input
+     * 描述符输入
      */
-    input  wire [PORTS*AXI_ADDR_WIDTH-1:0]  s_axis_desc_addr,
-    input  wire [PORTS*LEN_WIDTH-1:0]       s_axis_desc_len,
-    input  wire [PORTS*S_TAG_WIDTH-1:0]     s_axis_desc_tag,
-    input  wire [PORTS*AXIS_ID_WIDTH-1:0]   s_axis_desc_id,
-    input  wire [PORTS*AXIS_DEST_WIDTH-1:0] s_axis_desc_dest,
-    input  wire [PORTS*AXIS_USER_WIDTH-1:0] s_axis_desc_user,
-    input  wire [PORTS-1:0]                 s_axis_desc_valid,
-    output wire [PORTS-1:0]                 s_axis_desc_ready,
+    input  wire [PORTS*AXI_ADDR_WIDTH-1:0]  s_axis_desc_addr, // 各输入端口拼接的描述符地址。
+    input  wire [PORTS*LEN_WIDTH-1:0]       s_axis_desc_len, // 各输入端口拼接的描述符长度。
+    input  wire [PORTS*S_TAG_WIDTH-1:0]     s_axis_desc_tag, // 各输入端口拼接的原始 tag。
+    input  wire [PORTS*AXIS_ID_WIDTH-1:0]   s_axis_desc_id, // 各输入端口拼接的 AXIS ID sideband。
+    input  wire [PORTS*AXIS_DEST_WIDTH-1:0] s_axis_desc_dest, // 各输入端口拼接的 AXIS DEST sideband。
+    input  wire [PORTS*AXIS_USER_WIDTH-1:0] s_axis_desc_user, // 各输入端口拼接的 AXIS USER sideband。
+    input  wire [PORTS-1:0]                 s_axis_desc_valid, // 各输入端口描述符有效。
+    output wire [PORTS-1:0]                 s_axis_desc_ready, // 各输入端口描述符 ready。
 
     /*
-     * Descriptor status output
+     * 描述符状态输出
      */
-    output wire [PORTS*LEN_WIDTH-1:0]       m_axis_desc_status_len,
-    output wire [PORTS*S_TAG_WIDTH-1:0]     m_axis_desc_status_tag,
-    output wire [PORTS*AXIS_ID_WIDTH-1:0]   m_axis_desc_status_id,
-    output wire [PORTS*AXIS_DEST_WIDTH-1:0] m_axis_desc_status_dest,
-    output wire [PORTS*AXIS_USER_WIDTH-1:0] m_axis_desc_status_user,
-    output wire [PORTS*4-1:0]               m_axis_desc_status_error,
-    output wire [PORTS-1:0]                 m_axis_desc_status_valid
+    output wire [PORTS*LEN_WIDTH-1:0]       m_axis_desc_status_len, // 广播到各端口的完成长度(配合 valid 选通信号使用)。
+    output wire [PORTS*S_TAG_WIDTH-1:0]     m_axis_desc_status_tag, // 广播到各端口的原始 tag。
+    output wire [PORTS*AXIS_ID_WIDTH-1:0]   m_axis_desc_status_id, // 广播到各端口的 AXIS ID sideband。
+    output wire [PORTS*AXIS_DEST_WIDTH-1:0] m_axis_desc_status_dest, // 广播到各端口的 AXIS DEST sideband。
+    output wire [PORTS*AXIS_USER_WIDTH-1:0] m_axis_desc_status_user, // 广播到各端口的 AXIS USER sideband。
+    output wire [PORTS*4-1:0]               m_axis_desc_status_error, // 广播到各端口的错误码。
+    output wire [PORTS-1:0]                 m_axis_desc_status_valid // one-hot 完成状态有效，指示回送目标端口。
 );
 
 parameter CL_PORTS = $clog2(PORTS);
 
-// check configuration
+// 参数合法性检查
 initial begin
     if (M_TAG_WIDTH < S_TAG_WIDTH+$clog2(PORTS)) begin
         $error("Error: M_TAG_WIDTH must be at least $clog2(PORTS) larger than S_TAG_WIDTH (instance %m)");
@@ -122,37 +127,37 @@ initial begin
     end
 end
 
-// descriptor mux
-wire [PORTS-1:0] request;
-wire [PORTS-1:0] acknowledge;
-wire [PORTS-1:0] grant;
-wire grant_valid;
-wire [CL_PORTS-1:0] grant_encoded;
+// 描述符仲裁与复用
+wire [PORTS-1:0] request; // 仲裁请求向量。
+wire [PORTS-1:0] acknowledge; // 仲裁完成应答向量。
+wire [PORTS-1:0] grant; // 仲裁授权 one-hot 向量。
+wire grant_valid; // 是否存在有效授权端口。
+wire [CL_PORTS-1:0] grant_encoded; // 仲裁授权编码值(端口号)。
 
-// internal datapath
-reg  [AXI_ADDR_WIDTH-1:0]  m_axis_desc_addr_int;
-reg  [LEN_WIDTH-1:0]       m_axis_desc_len_int;
-reg  [M_TAG_WIDTH-1:0]     m_axis_desc_tag_int;
-reg  [AXIS_ID_WIDTH-1:0]   m_axis_desc_id_int;
-reg  [AXIS_DEST_WIDTH-1:0] m_axis_desc_dest_int;
-reg  [AXIS_USER_WIDTH-1:0] m_axis_desc_user_int;
-reg                        m_axis_desc_valid_int;
-reg                        m_axis_desc_ready_int_reg = 1'b0;
-wire                       m_axis_desc_ready_int_early;
+// 内部数据通路
+reg  [AXI_ADDR_WIDTH-1:0]  m_axis_desc_addr_int; // 内部待输出描述符地址。
+reg  [LEN_WIDTH-1:0]       m_axis_desc_len_int; // 内部待输出描述符长度。
+reg  [M_TAG_WIDTH-1:0]     m_axis_desc_tag_int; // 内部待输出扩展 tag(端口号+原始 tag)。
+reg  [AXIS_ID_WIDTH-1:0]   m_axis_desc_id_int; // 内部待输出 ID sideband。
+reg  [AXIS_DEST_WIDTH-1:0] m_axis_desc_dest_int; // 内部待输出 DEST sideband。
+reg  [AXIS_USER_WIDTH-1:0] m_axis_desc_user_int; // 内部待输出 USER sideband。
+reg                        m_axis_desc_valid_int; // 内部待输出有效。
+reg                        m_axis_desc_ready_int_reg = 1'b0; // 内部输入端 ready 寄存器。
+wire                       m_axis_desc_ready_int_early; // 内部输入端 ready 组合预测。
 
 assign s_axis_desc_ready = (m_axis_desc_ready_int_reg && grant_valid) << grant_encoded;
 
-// mux for incoming packet
-wire [AXI_ADDR_WIDTH-1:0]  current_s_desc_addr   = s_axis_desc_addr[grant_encoded*AXI_ADDR_WIDTH +: AXI_ADDR_WIDTH];
-wire [LEN_WIDTH-1:0]       current_s_desc_len    = s_axis_desc_len[grant_encoded*LEN_WIDTH +: LEN_WIDTH];
-wire [S_TAG_WIDTH-1:0]     current_s_desc_tag    = s_axis_desc_tag[grant_encoded*S_TAG_WIDTH +: S_TAG_WIDTH];
-wire [AXIS_ID_WIDTH-1:0]   current_s_desc_id     = s_axis_desc_id[grant_encoded*AXIS_ID_WIDTH +: AXIS_ID_WIDTH];
-wire [AXIS_DEST_WIDTH-1:0] current_s_desc_dest   = s_axis_desc_dest[grant_encoded*AXIS_DEST_WIDTH +: AXIS_DEST_WIDTH];
-wire [AXIS_USER_WIDTH-1:0] current_s_desc_user   = s_axis_desc_user[grant_encoded*AXIS_USER_WIDTH +: AXIS_USER_WIDTH];
-wire                       current_s_desc_valid  = s_axis_desc_valid[grant_encoded];
-wire                       current_s_desc_ready  = s_axis_desc_ready[grant_encoded];
+// 输入描述符选择
+wire [AXI_ADDR_WIDTH-1:0]  current_s_desc_addr   = s_axis_desc_addr[grant_encoded*AXI_ADDR_WIDTH +: AXI_ADDR_WIDTH]; // 当前获授权端口的地址字段。
+wire [LEN_WIDTH-1:0]       current_s_desc_len    = s_axis_desc_len[grant_encoded*LEN_WIDTH +: LEN_WIDTH]; // 当前获授权端口的长度字段。
+wire [S_TAG_WIDTH-1:0]     current_s_desc_tag    = s_axis_desc_tag[grant_encoded*S_TAG_WIDTH +: S_TAG_WIDTH]; // 当前获授权端口的原始 tag。
+wire [AXIS_ID_WIDTH-1:0]   current_s_desc_id     = s_axis_desc_id[grant_encoded*AXIS_ID_WIDTH +: AXIS_ID_WIDTH]; // 当前获授权端口的 ID sideband。
+wire [AXIS_DEST_WIDTH-1:0] current_s_desc_dest   = s_axis_desc_dest[grant_encoded*AXIS_DEST_WIDTH +: AXIS_DEST_WIDTH]; // 当前获授权端口的 DEST sideband。
+wire [AXIS_USER_WIDTH-1:0] current_s_desc_user   = s_axis_desc_user[grant_encoded*AXIS_USER_WIDTH +: AXIS_USER_WIDTH]; // 当前获授权端口的 USER sideband。
+wire                       current_s_desc_valid  = s_axis_desc_valid[grant_encoded]; // 当前获授权端口 valid。
+wire                       current_s_desc_ready  = s_axis_desc_ready[grant_encoded]; // 当前获授权端口 ready。
 
-// arbiter instance
+// 仲裁器实例
 arbiter #(
     .PORTS(PORTS),
     .ARB_TYPE_ROUND_ROBIN(ARB_TYPE_ROUND_ROBIN),
@@ -183,27 +188,27 @@ always @* begin
     m_axis_desc_valid_int  = current_s_desc_valid && m_axis_desc_ready_int_reg && grant_valid;
 end
 
-// output datapath logic
-reg [AXI_ADDR_WIDTH-1:0]  m_axis_desc_addr_reg   = {AXI_ADDR_WIDTH{1'b0}};
-reg [LEN_WIDTH-1:0]       m_axis_desc_len_reg    = {LEN_WIDTH{1'b0}};
-reg [M_TAG_WIDTH-1:0]     m_axis_desc_tag_reg    = {M_TAG_WIDTH{1'b0}};
-reg [AXIS_ID_WIDTH-1:0]   m_axis_desc_id_reg     = {AXIS_ID_WIDTH{1'b0}};
-reg [AXIS_DEST_WIDTH-1:0] m_axis_desc_dest_reg   = {AXIS_DEST_WIDTH{1'b0}};
-reg [AXIS_USER_WIDTH-1:0] m_axis_desc_user_reg   = {AXIS_USER_WIDTH{1'b0}};
-reg                       m_axis_desc_valid_reg  = 1'b0, m_axis_desc_valid_next;
+// 输出数据通路逻辑
+reg [AXI_ADDR_WIDTH-1:0]  m_axis_desc_addr_reg   = {AXI_ADDR_WIDTH{1'b0}}; // 主输出寄存器：地址。
+reg [LEN_WIDTH-1:0]       m_axis_desc_len_reg    = {LEN_WIDTH{1'b0}}; // 主输出寄存器：长度。
+reg [M_TAG_WIDTH-1:0]     m_axis_desc_tag_reg    = {M_TAG_WIDTH{1'b0}}; // 主输出寄存器：扩展 tag。
+reg [AXIS_ID_WIDTH-1:0]   m_axis_desc_id_reg     = {AXIS_ID_WIDTH{1'b0}}; // 主输出寄存器：ID sideband。
+reg [AXIS_DEST_WIDTH-1:0] m_axis_desc_dest_reg   = {AXIS_DEST_WIDTH{1'b0}}; // 主输出寄存器：DEST sideband。
+reg [AXIS_USER_WIDTH-1:0] m_axis_desc_user_reg   = {AXIS_USER_WIDTH{1'b0}}; // 主输出寄存器：USER sideband。
+reg                       m_axis_desc_valid_reg  = 1'b0, m_axis_desc_valid_next; // 主输出寄存器 valid。
 
-reg [AXI_ADDR_WIDTH-1:0]  temp_m_axis_desc_addr_reg   = {AXI_ADDR_WIDTH{1'b0}};
-reg [LEN_WIDTH-1:0]       temp_m_axis_desc_len_reg    = {LEN_WIDTH{1'b0}};
-reg [M_TAG_WIDTH-1:0]     temp_m_axis_desc_tag_reg    = {M_TAG_WIDTH{1'b0}};
-reg [AXIS_ID_WIDTH-1:0]   temp_m_axis_desc_id_reg     = {AXIS_ID_WIDTH{1'b0}};
-reg [AXIS_DEST_WIDTH-1:0] temp_m_axis_desc_dest_reg   = {AXIS_DEST_WIDTH{1'b0}};
-reg [AXIS_USER_WIDTH-1:0] temp_m_axis_desc_user_reg   = {AXIS_USER_WIDTH{1'b0}};
-reg                       temp_m_axis_desc_valid_reg  = 1'b0, temp_m_axis_desc_valid_next;
+reg [AXI_ADDR_WIDTH-1:0]  temp_m_axis_desc_addr_reg   = {AXI_ADDR_WIDTH{1'b0}}; // 临时寄存器：地址。
+reg [LEN_WIDTH-1:0]       temp_m_axis_desc_len_reg    = {LEN_WIDTH{1'b0}}; // 临时寄存器：长度。
+reg [M_TAG_WIDTH-1:0]     temp_m_axis_desc_tag_reg    = {M_TAG_WIDTH{1'b0}}; // 临时寄存器：扩展 tag。
+reg [AXIS_ID_WIDTH-1:0]   temp_m_axis_desc_id_reg     = {AXIS_ID_WIDTH{1'b0}}; // 临时寄存器：ID sideband。
+reg [AXIS_DEST_WIDTH-1:0] temp_m_axis_desc_dest_reg   = {AXIS_DEST_WIDTH{1'b0}}; // 临时寄存器：DEST sideband。
+reg [AXIS_USER_WIDTH-1:0] temp_m_axis_desc_user_reg   = {AXIS_USER_WIDTH{1'b0}}; // 临时寄存器：USER sideband。
+reg                       temp_m_axis_desc_valid_reg  = 1'b0, temp_m_axis_desc_valid_next; // 临时寄存器 valid。
 
-// datapath control
-reg store_axis_int_to_output;
-reg store_axis_int_to_temp;
-reg store_axis_temp_to_output;
+// 数据通路控制
+reg store_axis_int_to_output; // 将内部输入直接写入主输出寄存器。
+reg store_axis_int_to_temp; // 将内部输入写入临时寄存器。
+reg store_axis_temp_to_output; // 将临时寄存器回填主输出寄存器。
 
 assign m_axis_desc_addr   = m_axis_desc_addr_reg;
 assign m_axis_desc_len    = m_axis_desc_len_reg;
@@ -213,11 +218,11 @@ assign m_axis_desc_dest   = AXIS_DEST_ENABLE ? m_axis_desc_dest_reg : {AXIS_DEST
 assign m_axis_desc_user   = AXIS_USER_ENABLE ? m_axis_desc_user_reg : {AXIS_USER_WIDTH{1'b0}};
 assign m_axis_desc_valid  = m_axis_desc_valid_reg;
 
-// enable ready input next cycle if output is ready or the temp reg will not be filled on the next cycle (output reg empty or no input)
+// 下拍 ready 预判：输出可接收，或下拍临时寄存器不会被占用时拉高
 assign m_axis_desc_ready_int_early = m_axis_desc_ready || (!temp_m_axis_desc_valid_reg && (!m_axis_desc_valid_reg || !m_axis_desc_valid_int));
 
 always @* begin
-    // transfer sink ready state to source
+    // 将下游就绪关系映射到上游
     m_axis_desc_valid_next = m_axis_desc_valid_reg;
     temp_m_axis_desc_valid_next = temp_m_axis_desc_valid_reg;
 
@@ -226,18 +231,18 @@ always @* begin
     store_axis_temp_to_output = 1'b0;
 
     if (m_axis_desc_ready_int_reg) begin
-        // input is ready
+        // 当前允许接收输入
         if (m_axis_desc_ready || !m_axis_desc_valid_reg) begin
-            // output is ready or currently not valid, transfer data to output
+            // 输出可接收，或当前输出无效：输入直写主输出
             m_axis_desc_valid_next = m_axis_desc_valid_int;
             store_axis_int_to_output = 1'b1;
         end else begin
-            // output is not ready, store input in temp
+            // 输出阻塞：输入写入临时寄存器
             temp_m_axis_desc_valid_next = m_axis_desc_valid_int;
             store_axis_int_to_temp = 1'b1;
         end
     end else if (m_axis_desc_ready) begin
-        // input is not ready, but output is ready
+        // 当前不接收新输入，但输出可接收：临时寄存器回放
         m_axis_desc_valid_next = temp_m_axis_desc_valid_reg;
         temp_m_axis_desc_valid_next = 1'b0;
         store_axis_temp_to_output = 1'b1;
@@ -255,7 +260,7 @@ always @(posedge clk) begin
         temp_m_axis_desc_valid_reg <= temp_m_axis_desc_valid_next;
     end
 
-    // datapath
+    // 数据通路寄存
     if (store_axis_int_to_output) begin
         m_axis_desc_addr_reg <= m_axis_desc_addr_int;
         m_axis_desc_len_reg <= m_axis_desc_len_int;
@@ -282,14 +287,14 @@ always @(posedge clk) begin
     end
 end
 
-// descriptor status demux
-reg [LEN_WIDTH-1:0] m_axis_desc_status_len_reg = {LEN_WIDTH{1'b0}};
-reg [S_TAG_WIDTH-1:0] m_axis_desc_status_tag_reg = {S_TAG_WIDTH{1'b0}};
-reg [AXIS_ID_WIDTH-1:0] m_axis_desc_status_id_reg = {AXIS_ID_WIDTH{1'b0}};
-reg [AXIS_DEST_WIDTH-1:0] m_axis_desc_status_dest_reg = {AXIS_DEST_WIDTH{1'b0}};
-reg [AXIS_USER_WIDTH-1:0] m_axis_desc_status_user_reg = {AXIS_USER_WIDTH{1'b0}};
-reg [3:0] m_axis_desc_status_error_reg = 4'd0;
-reg [PORTS-1:0] m_axis_desc_status_valid_reg = {PORTS{1'b0}};
+// 描述符状态解复用
+reg [LEN_WIDTH-1:0] m_axis_desc_status_len_reg = {LEN_WIDTH{1'b0}}; // 最近一次完成状态长度缓存。
+reg [S_TAG_WIDTH-1:0] m_axis_desc_status_tag_reg = {S_TAG_WIDTH{1'b0}}; // 最近一次完成状态原始 tag 缓存。
+reg [AXIS_ID_WIDTH-1:0] m_axis_desc_status_id_reg = {AXIS_ID_WIDTH{1'b0}}; // 最近一次完成状态 ID sideband 缓存。
+reg [AXIS_DEST_WIDTH-1:0] m_axis_desc_status_dest_reg = {AXIS_DEST_WIDTH{1'b0}}; // 最近一次完成状态 DEST sideband 缓存。
+reg [AXIS_USER_WIDTH-1:0] m_axis_desc_status_user_reg = {AXIS_USER_WIDTH{1'b0}}; // 最近一次完成状态 USER sideband 缓存。
+reg [3:0] m_axis_desc_status_error_reg = 4'd0; // 最近一次完成状态错误码缓存。
+reg [PORTS-1:0] m_axis_desc_status_valid_reg = {PORTS{1'b0}}; // 完成状态 one-hot 有效位。
 
 assign m_axis_desc_status_len   = {PORTS{m_axis_desc_status_len_reg}};
 assign m_axis_desc_status_tag   = {PORTS{m_axis_desc_status_tag_reg}};

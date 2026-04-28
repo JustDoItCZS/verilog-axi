@@ -22,94 +22,99 @@ THE SOFTWARE.
 
 */
 
-// Language: Verilog 2001
+// 语言: Verilog 2001
 
 `resetall
 `timescale 1ns / 1ps
 `default_nettype none
 
 /*
- * AXI4 RAM write interface
+ * AXI4 RAM 写接口
+ *
+ * 模块目录
+ * 1) 将 AXI AW/W 突发转换为逐拍 RAM 写命令。
+ * 2) 跟踪突发进度并更新地址步进。
+ * 3) 最后一拍写数据被接纳后返回 AXI B 响应。
  */
 module axi_ram_wr_if #
 (
-    // Width of data bus in bits
+    // 数据总线位宽
     parameter DATA_WIDTH = 32,
-    // Width of address bus in bits
+    // 地址总线位宽
     parameter ADDR_WIDTH = 16,
-    // Width of wstrb (width of data bus in words)
+    // WSTRB 位宽（按字节 lane）
     parameter STRB_WIDTH = (DATA_WIDTH/8),
-    // Width of ID signal
+    // ID 信号位宽
     parameter ID_WIDTH = 8,
-    // Propagate awuser signal
+    // 是否透传 awuser 信号
     parameter AWUSER_ENABLE = 0,
-    // Width of awuser signal
+    // awuser 信号位宽
     parameter AWUSER_WIDTH = 1,
-    // Propagate wuser signal
+    // 是否透传 wuser 信号
     parameter WUSER_ENABLE = 0,
-    // Width of wuser signal
+    // wuser 信号位宽
     parameter WUSER_WIDTH = 1,
-    // Propagate buser signal
+    // 是否透传 buser 信号
     parameter BUSER_ENABLE = 0,
-    // Width of buser signal
+    // buser 信号位宽
     parameter BUSER_WIDTH = 1
 )
 (
-    input  wire                     clk,
-    input  wire                     rst,
+    input  wire                     clk, // 写接口时钟。
+    input  wire                     rst, // AW/W 命令 FSM 与 B 通道状态同步复位。
 
     /*
-     * AXI slave interface
+     * AXI 从接口
      */
-    input  wire [ID_WIDTH-1:0]      s_axi_awid,
-    input  wire [ADDR_WIDTH-1:0]    s_axi_awaddr,
-    input  wire [7:0]               s_axi_awlen,
-    input  wire [2:0]               s_axi_awsize,
-    input  wire [1:0]               s_axi_awburst,
-    input  wire                     s_axi_awlock,
-    input  wire [3:0]               s_axi_awcache,
-    input  wire [2:0]               s_axi_awprot,
-    input  wire [3:0]               s_axi_awqos,
-    input  wire [3:0]               s_axi_awregion,
-    input  wire [AWUSER_WIDTH-1:0]  s_axi_awuser,
-    input  wire                     s_axi_awvalid,
-    output wire                     s_axi_awready,
-    input  wire [DATA_WIDTH-1:0]    s_axi_wdata,
-    input  wire [STRB_WIDTH-1:0]    s_axi_wstrb,
-    input  wire                     s_axi_wlast,
-    input  wire [WUSER_WIDTH-1:0]   s_axi_wuser,
-    input  wire                     s_axi_wvalid,
-    output wire                     s_axi_wready,
-    output wire [ID_WIDTH-1:0]      s_axi_bid,
-    output wire [1:0]               s_axi_bresp,
-    output wire [BUSER_WIDTH-1:0]   s_axi_buser,
-    output wire                     s_axi_bvalid,
-    input  wire                     s_axi_bready,
+    input  wire [ID_WIDTH-1:0]      s_axi_awid, // AXI AW ID（写地址通道标识）。
+    input  wire [ADDR_WIDTH-1:0]    s_axi_awaddr, // AXI AW 地址。
+    input  wire [7:0]               s_axi_awlen, // AXI AW 突发长度。
+    input  wire [2:0]               s_axi_awsize, // AXI AW 突发尺寸。
+    input  wire [1:0]               s_axi_awburst, // AXI AW 突发类型。
+    input  wire                     s_axi_awlock, // AXI AW 锁属性。
+    input  wire [3:0]               s_axi_awcache, // AXI AW cache 属性。
+    input  wire [2:0]               s_axi_awprot, // AXI AW 保护属性。
+    input  wire [3:0]               s_axi_awqos, // AXI AW QoS（服务质量字段）。
+    input  wire [3:0]               s_axi_awregion, // AXI AW region（区域属性字段）。
+    input  wire [AWUSER_WIDTH-1:0]  s_axi_awuser, // AXI AW 用户旁带。
+    input  wire                     s_axi_awvalid, // AXI AWVALID（写地址有效）。
+    output wire                     s_axi_awready, // AXI AWREADY（写地址就绪）。
+    input  wire [DATA_WIDTH-1:0]    s_axi_wdata, // AXI W 数据。
+    input  wire [STRB_WIDTH-1:0]    s_axi_wstrb, // AXI W 字节使能。
+    input  wire                     s_axi_wlast, // AXI WLAST（写突发最后一拍）。
+    input  wire [WUSER_WIDTH-1:0]   s_axi_wuser, // AXI W 用户旁带。
+    input  wire                     s_axi_wvalid, // AXI WVALID（写数据有效）。
+    output wire                     s_axi_wready, // AXI WREADY（写数据就绪）。
+    output wire [ID_WIDTH-1:0]      s_axi_bid, // AXI BID（写响应标识）。
+    output wire [1:0]               s_axi_bresp, // AXI BRESP（固定 OKAY）。
+    output wire [BUSER_WIDTH-1:0]   s_axi_buser, // AXI BUSER（本模型固定为 0）。
+    output wire                     s_axi_bvalid, // AXI BVALID（写响应有效）。
+    input  wire                     s_axi_bready, // AXI BREADY（写响应就绪）。
 
     /*
-     * RAM interface
+     * RAM 接口
      */
-    output wire [ID_WIDTH-1:0]      ram_wr_cmd_id,
-    output wire [ADDR_WIDTH-1:0]    ram_wr_cmd_addr,
-    output wire                     ram_wr_cmd_lock,
-    output wire [3:0]               ram_wr_cmd_cache,
-    output wire [2:0]               ram_wr_cmd_prot,
-    output wire [3:0]               ram_wr_cmd_qos,
-    output wire [3:0]               ram_wr_cmd_region,
-    output wire [AWUSER_WIDTH-1:0]  ram_wr_cmd_auser,
-    output wire [DATA_WIDTH-1:0]    ram_wr_cmd_data,
-    output wire [STRB_WIDTH-1:0]    ram_wr_cmd_strb,
-    output wire [WUSER_WIDTH-1:0]   ram_wr_cmd_user,
-    output wire                     ram_wr_cmd_en,
-    output wire                     ram_wr_cmd_last,
-    input  wire                     ram_wr_cmd_ready
+    output wire [ID_WIDTH-1:0]      ram_wr_cmd_id, // RAM 写命令 ID。
+    output wire [ADDR_WIDTH-1:0]    ram_wr_cmd_addr, // RAM 写命令地址。
+    output wire                     ram_wr_cmd_lock, // RAM 写命令锁属性。
+    output wire [3:0]               ram_wr_cmd_cache, // RAM 写命令 cache 属性。
+    output wire [2:0]               ram_wr_cmd_prot, // RAM 写命令保护属性。
+    output wire [3:0]               ram_wr_cmd_qos, // RAM 写命令 QoS 属性。
+    output wire [3:0]               ram_wr_cmd_region, // RAM 写命令 region 属性。
+    output wire [AWUSER_WIDTH-1:0]  ram_wr_cmd_auser, // RAM 写命令 AWUSER 属性。
+    output wire [DATA_WIDTH-1:0]    ram_wr_cmd_data, // RAM 写命令数据。
+    output wire [STRB_WIDTH-1:0]    ram_wr_cmd_strb, // RAM 写命令字节使能。
+    output wire [WUSER_WIDTH-1:0]   ram_wr_cmd_user, // RAM 写命令 WUSER 属性。
+    output wire                     ram_wr_cmd_en, // RAM 写命令有效信号。
+    output wire                     ram_wr_cmd_last, // RAM 写命令最后一拍标记。
+    input  wire                     ram_wr_cmd_ready // RAM 写命令 ready。
 );
 
-parameter VALID_ADDR_WIDTH = ADDR_WIDTH - $clog2(STRB_WIDTH);
-parameter WORD_WIDTH = STRB_WIDTH;
-parameter WORD_SIZE = DATA_WIDTH/WORD_WIDTH;
+parameter VALID_ADDR_WIDTH = ADDR_WIDTH - $clog2(STRB_WIDTH); // 去掉字节 lane 位后的字地址位宽。
+parameter WORD_WIDTH = STRB_WIDTH; // 每个字包含的字节 lane 数量。
+parameter WORD_SIZE = DATA_WIDTH/WORD_WIDTH; // 每个 lane 对应位宽。
 
-// bus width assertions
+// 总线位宽断言检查
 initial begin
     if (WORD_SIZE * STRB_WIDTH != DATA_WIDTH) begin
         $error("Error: AXI data width not evenly divisble (instance %m)");
@@ -123,29 +128,29 @@ initial begin
 end
 
 localparam [1:0]
-    STATE_IDLE = 2'd0,
-    STATE_BURST = 2'd1,
-    STATE_RESP = 2'd2;
+    STATE_IDLE = 2'd0, // 等待 AXI AW 握手。
+    STATE_BURST = 2'd1, // 将 W 数据拍连续输出为 RAM 写命令。
+    STATE_RESP = 2'd2; // 发生反压时保持并发送 AXI B 响应。
 
-reg [1:0] state_reg = STATE_IDLE, state_next;
+reg [1:0] state_reg = STATE_IDLE, state_next; // 写命令 FSM 状态。
 
-reg [ID_WIDTH-1:0] write_id_reg = {ID_WIDTH{1'b0}}, write_id_next;
-reg [ADDR_WIDTH-1:0] write_addr_reg = {ADDR_WIDTH{1'b0}}, write_addr_next;
-reg write_lock_reg = 1'b0, write_lock_next;
-reg [3:0] write_cache_reg = 4'd0, write_cache_next;
-reg [2:0] write_prot_reg = 3'd0, write_prot_next;
-reg [3:0] write_qos_reg = 4'd0, write_qos_next;
-reg [3:0] write_region_reg = 4'd0, write_region_next;
-reg [AWUSER_WIDTH-1:0] write_awuser_reg = {AWUSER_WIDTH{1'b0}}, write_awuser_next;
-reg write_addr_valid_reg = 1'b0, write_addr_valid_next;
-reg write_last_reg = 1'b0, write_last_next;
-reg [7:0] write_count_reg = 8'd0, write_count_next;
-reg [2:0] write_size_reg = 3'd0, write_size_next;
-reg [1:0] write_burst_reg = 2'd0, write_burst_next;
+reg [ID_WIDTH-1:0] write_id_reg = {ID_WIDTH{1'b0}}, write_id_next; // 当前突发 ID。
+reg [ADDR_WIDTH-1:0] write_addr_reg = {ADDR_WIDTH{1'b0}}, write_addr_next; // 当前写地址指针。
+reg write_lock_reg = 1'b0, write_lock_next; // 当前锁属性。
+reg [3:0] write_cache_reg = 4'd0, write_cache_next; // 当前 cache 属性。
+reg [2:0] write_prot_reg = 3'd0, write_prot_next; // 当前保护属性。
+reg [3:0] write_qos_reg = 4'd0, write_qos_next; // 当前 QoS 属性。
+reg [3:0] write_region_reg = 4'd0, write_region_next; // 当前 region 属性。
+reg [AWUSER_WIDTH-1:0] write_awuser_reg = {AWUSER_WIDTH{1'b0}}, write_awuser_next; // 当前 AWUSER 属性。
+reg write_addr_valid_reg = 1'b0, write_addr_valid_next; // RAM 命令有效状态。
+reg write_last_reg = 1'b0, write_last_next; // RAM 命令流最后一拍标记。
+reg [7:0] write_count_reg = 8'd0, write_count_next; // 剩余拍计数。
+reg [2:0] write_size_reg = 3'd0, write_size_next; // 地址步进尺寸。
+reg [1:0] write_burst_reg = 2'd0, write_burst_next; // 突发类型。
 
-reg s_axi_awready_reg = 1'b0, s_axi_awready_next;
-reg [ID_WIDTH-1:0] s_axi_bid_reg = {ID_WIDTH{1'b0}}, s_axi_bid_next;
-reg s_axi_bvalid_reg = 1'b0, s_axi_bvalid_next;
+reg s_axi_awready_reg = 1'b0, s_axi_awready_next; // AXI AWREADY 状态。
+reg [ID_WIDTH-1:0] s_axi_bid_reg = {ID_WIDTH{1'b0}}, s_axi_bid_next; // AXI BID 输出寄存器。
+reg s_axi_bvalid_reg = 1'b0, s_axi_bvalid_next; // AXI BVALID 状态。
 
 assign s_axi_awready = s_axi_awready_reg;
 assign s_axi_wready = write_addr_valid_reg && ram_wr_cmd_ready;

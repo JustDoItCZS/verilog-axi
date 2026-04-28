@@ -22,153 +22,159 @@ THE SOFTWARE.
 
 */
 
-// Language: Verilog 2001
+// 语言: Verilog 2001
 
 `resetall
 `timescale 1ns / 1ps
 `default_nettype none
 
 /*
- * AXI4 virtual FIFO (raw)
+ * AXI4 虚拟 FIFO（原始版）
+ *
+ * 模块目录：
+ * 1) 写侧子模块 axi_vfifo_raw_wr：把分段输入数据缓存后，通过AXI AW/W/B写入外部存储
+ * 2) 读侧子模块 axi_vfifo_raw_rd：从外部存储通过AXI AR/R读回，再输出分段数据
+ * 3) 复位/使能控制：统一协调cfg_enable/cfg_reset与跨域复位请求
+ * 4) FIFO指针联动：通过wr/rd start/finish指针构成环形虚拟FIFO
  */
 module axi_vfifo_raw #
 (
-    // Width of input segment
+    // 输入分段位宽
     parameter SEG_WIDTH = 32,
-    // Segment count
+    // 分段数量
     parameter SEG_CNT = 2,
-    // Width of AXI data bus in bits
+    // AXI 数据总线位宽
     parameter AXI_DATA_WIDTH = SEG_WIDTH*SEG_CNT,
-    // Width of AXI address bus in bits
+    // AXI 地址总线位宽
     parameter AXI_ADDR_WIDTH = 16,
-    // Width of AXI wstrb (width of data bus in words)
+    // AXI WSTRB 位宽（按字节）
     parameter AXI_STRB_WIDTH = (AXI_DATA_WIDTH/8),
-    // Width of AXI ID signal
+    // AXI ID 位宽
     parameter AXI_ID_WIDTH = 8,
-    // Maximum AXI burst length to generate
+    // 允许生成的 AXI 最大突发长度
     parameter AXI_MAX_BURST_LEN = 16,
-    // Width of length field
+    // 长度字段位宽
     parameter LEN_WIDTH = AXI_ADDR_WIDTH,
-    // Input FIFO depth for AXI write data (full-width words)
+    // AXI 写数据输入 FIFO 深度（全宽字）
     parameter WRITE_FIFO_DEPTH = 64,
-    // Max AXI write burst length
+    // AXI 最大写突发长度
     parameter WRITE_MAX_BURST_LEN = WRITE_FIFO_DEPTH/4,
-    // Output FIFO depth for AXI read data (full-width words)
+    // AXI 读数据输出 FIFO 深度（全宽字）
     parameter READ_FIFO_DEPTH = 128,
-    // Max AXI read burst length
+    // AXI 最大读突发长度
     parameter READ_MAX_BURST_LEN = WRITE_MAX_BURST_LEN,
-    // Watermark level
+    // 水位阈值
     parameter WATERMARK_LEVEL = WRITE_FIFO_DEPTH/2,
-    // Use control output
+    // 是否启用控制输出
     parameter CTRL_OUT_EN = 0
 )
 (
-    input  wire                          clk,
-    input  wire                          rst,
+    input  wire                          clk, // 核心控制时钟（写侧与读侧AXI控制共享）
+    input  wire                          rst, // 核心控制复位
 
     /*
-     * Segmented data input (from encode logic)
+     * 分段数据输入（来自编码逻辑）
      */
-    input  wire                          input_clk,
-    input  wire                          input_rst,
-    output wire                          input_rst_out,
-    output wire                          input_watermark,
-    input  wire [SEG_CNT*SEG_WIDTH-1:0]  input_data,
-    input  wire [SEG_CNT-1:0]            input_valid,
-    output wire [SEG_CNT-1:0]            input_ready,
+    input  wire                          input_clk, // 分段输入时钟域
+    input  wire                          input_rst, // 分段输入复位
+    output wire                          input_rst_out, // 反馈给输入域上游的复位输出
+    output wire                          input_watermark, // 输入水位告警（用于上游节流）
+    input  wire [SEG_CNT*SEG_WIDTH-1:0]  input_data, // 分段输入数据
+    input  wire [SEG_CNT-1:0]            input_valid, // 分段输入有效
+    output wire [SEG_CNT-1:0]            input_ready, // 分段输入就绪
 
     /*
-     * Segmented data output (to decode logic)
+     * 分段数据输出（到解码逻辑）
      */
-    input  wire                          output_clk,
-    input  wire                          output_rst,
-    output wire                          output_rst_out,
-    output wire [SEG_CNT*SEG_WIDTH-1:0]  output_data,
-    output wire [SEG_CNT-1:0]            output_valid,
-    input  wire [SEG_CNT-1:0]            output_ready,
-    output wire [SEG_CNT*SEG_WIDTH-1:0]  output_ctrl_data,
-    output wire [SEG_CNT-1:0]            output_ctrl_valid,
-    input  wire [SEG_CNT-1:0]            output_ctrl_ready,
+    input  wire                          output_clk, // 分段输出时钟域
+    input  wire                          output_rst, // 分段输出复位
+    output wire                          output_rst_out, // 反馈给输出域下游的复位输出
+    output wire [SEG_CNT*SEG_WIDTH-1:0]  output_data, // 分段主数据输出
+    output wire [SEG_CNT-1:0]            output_valid, // 分段主数据有效
+    input  wire [SEG_CNT-1:0]            output_ready, // 分段主数据就绪
+    output wire [SEG_CNT*SEG_WIDTH-1:0]  output_ctrl_data, // 分段控制数据输出（CTRL_OUT_EN启用）
+    output wire [SEG_CNT-1:0]            output_ctrl_valid, // 分段控制数据有效
+    input  wire [SEG_CNT-1:0]            output_ctrl_ready, // 分段控制数据就绪
 
     /*
-     * AXI master interface
+     * AXI 主接口
      */
-    output wire [AXI_ID_WIDTH-1:0]       m_axi_awid,
-    output wire [AXI_ADDR_WIDTH-1:0]     m_axi_awaddr,
-    output wire [7:0]                    m_axi_awlen,
-    output wire [2:0]                    m_axi_awsize,
-    output wire [1:0]                    m_axi_awburst,
-    output wire                          m_axi_awlock,
-    output wire [3:0]                    m_axi_awcache,
-    output wire [2:0]                    m_axi_awprot,
-    output wire                          m_axi_awvalid,
-    input  wire                          m_axi_awready,
-    output wire [AXI_DATA_WIDTH-1:0]     m_axi_wdata,
-    output wire [AXI_STRB_WIDTH-1:0]     m_axi_wstrb,
-    output wire                          m_axi_wlast,
-    output wire                          m_axi_wvalid,
-    input  wire                          m_axi_wready,
-    input  wire [AXI_ID_WIDTH-1:0]       m_axi_bid,
-    input  wire [1:0]                    m_axi_bresp,
-    input  wire                          m_axi_bvalid,
-    output wire                          m_axi_bready,
-    output wire [AXI_ID_WIDTH-1:0]       m_axi_arid,
-    output wire [AXI_ADDR_WIDTH-1:0]     m_axi_araddr,
-    output wire [7:0]                    m_axi_arlen,
-    output wire [2:0]                    m_axi_arsize,
-    output wire [1:0]                    m_axi_arburst,
-    output wire                          m_axi_arlock,
-    output wire [3:0]                    m_axi_arcache,
-    output wire [2:0]                    m_axi_arprot,
-    output wire                          m_axi_arvalid,
-    input  wire                          m_axi_arready,
-    input  wire [AXI_ID_WIDTH-1:0]       m_axi_rid,
-    input  wire [AXI_DATA_WIDTH-1:0]     m_axi_rdata,
-    input  wire [1:0]                    m_axi_rresp,
-    input  wire                          m_axi_rlast,
-    input  wire                          m_axi_rvalid,
-    output wire                          m_axi_rready,
+    output wire [AXI_ID_WIDTH-1:0]       m_axi_awid, // AXI写地址ID
+    output wire [AXI_ADDR_WIDTH-1:0]     m_axi_awaddr, // AXI写地址
+    output wire [7:0]                    m_axi_awlen, // AXI 写突发长度（拍数减 1）
+    output wire [2:0]                    m_axi_awsize, // AXI写每拍大小编码
+    output wire [1:0]                    m_axi_awburst, // AXI写突发类型
+    output wire                          m_axi_awlock, // AXI写锁信号
+    output wire [3:0]                    m_axi_awcache, // AXI写缓存属性
+    output wire [2:0]                    m_axi_awprot, // AXI写保护属性
+    output wire                          m_axi_awvalid, // AXI写地址有效
+    input  wire                          m_axi_awready, // AXI写地址就绪
+    output wire [AXI_DATA_WIDTH-1:0]     m_axi_wdata, // AXI写数据
+    output wire [AXI_STRB_WIDTH-1:0]     m_axi_wstrb, // AXI写字节使能
+    output wire                          m_axi_wlast, // AXI写最后一拍
+    output wire                          m_axi_wvalid, // AXI写数据有效
+    input  wire                          m_axi_wready, // AXI写数据就绪
+    input  wire [AXI_ID_WIDTH-1:0]       m_axi_bid, // AXI写响应ID
+    input  wire [1:0]                    m_axi_bresp, // AXI写响应码
+    input  wire                          m_axi_bvalid, // AXI写响应有效
+    output wire                          m_axi_bready, // AXI写响应就绪
+    output wire [AXI_ID_WIDTH-1:0]       m_axi_arid, // AXI读地址ID
+    output wire [AXI_ADDR_WIDTH-1:0]     m_axi_araddr, // AXI读地址
+    output wire [7:0]                    m_axi_arlen, // AXI 读突发长度（拍数减 1）
+    output wire [2:0]                    m_axi_arsize, // AXI读每拍大小编码
+    output wire [1:0]                    m_axi_arburst, // AXI读突发类型
+    output wire                          m_axi_arlock, // AXI读锁信号
+    output wire [3:0]                    m_axi_arcache, // AXI读缓存属性
+    output wire [2:0]                    m_axi_arprot, // AXI读保护属性
+    output wire                          m_axi_arvalid, // AXI读地址有效
+    input  wire                          m_axi_arready, // AXI读地址就绪
+    input  wire [AXI_ID_WIDTH-1:0]       m_axi_rid, // AXI读数据ID
+    input  wire [AXI_DATA_WIDTH-1:0]     m_axi_rdata, // AXI读数据
+    input  wire [1:0]                    m_axi_rresp, // AXI读响应码
+    input  wire                          m_axi_rlast, // AXI读最后一拍
+    input  wire                          m_axi_rvalid, // AXI读数据有效
+    output wire                          m_axi_rready, // AXI读数据就绪
 
     /*
-     * Reset sync
+     * 复位同步
      */
-    output wire                          rst_req_out,
-    input  wire                          rst_req_in,
+    output wire                          rst_req_out, // 对外发布的复位请求（本模块任一域请求复位时拉高）
+    input  wire                          rst_req_in, // 来自上层/相邻通道的复位请求输入
 
     /*
-     * Configuration
+     * 配置
      */
-    input  wire [AXI_ADDR_WIDTH-1:0]     cfg_fifo_base_addr,
-    input  wire [LEN_WIDTH-1:0]          cfg_fifo_size_mask,
-    input  wire                          cfg_enable,
-    input  wire                          cfg_reset,
+    input  wire [AXI_ADDR_WIDTH-1:0]     cfg_fifo_base_addr, // FIFO映射到外部存储的基地址
+    input  wire [LEN_WIDTH-1:0]          cfg_fifo_size_mask, // FIFO容量掩码（环形地址回绕）
+    input  wire                          cfg_enable, // 使能虚拟FIFO读写流程
+    input  wire                          cfg_reset, // 请求复位FIFO状态与指针
 
     /*
-     * Status
+     * 状态
      */
-    output wire [LEN_WIDTH+1-1:0]        sts_fifo_occupancy,
-    output wire                          sts_fifo_empty,
-    output wire                          sts_fifo_full,
-    output wire                          sts_reset,
-    output wire                          sts_active,
-    output wire                          sts_write_active,
-    output wire                          sts_read_active
+    output wire [LEN_WIDTH+1-1:0]        sts_fifo_occupancy, // FIFO占用量（由写侧输出）
+    output wire                          sts_fifo_empty, // FIFO空标志（由写侧输出）
+    output wire                          sts_fifo_full, // FIFO满标志（由写侧输出）
+    output wire                          sts_reset, // 当前处于复位/冲刷状态
+    output wire                          sts_active, // 当前配置已生效且处于工作状态
+    output wire                          sts_write_active, // 写侧活跃状态
+    output wire                          sts_read_active // 读侧活跃状态
 );
 
 localparam ADDR_MASK = {AXI_ADDR_WIDTH{1'b1}} << $clog2(AXI_STRB_WIDTH);
 
-reg fifo_reset_reg = 1'b1, fifo_reset_next;
-reg fifo_enable_reg = 1'b0, fifo_enable_next;
-reg [AXI_ADDR_WIDTH-1:0] fifo_base_addr_reg = 0, fifo_base_addr_next;
-reg [LEN_WIDTH-1:0] fifo_size_mask_reg = 0, fifo_size_mask_next;
+reg fifo_reset_reg = 1'b1, fifo_reset_next; // FIFO复位状态寄存器及其下一状态
+reg fifo_enable_reg = 1'b0, fifo_enable_next; // FIFO使能状态寄存器及其下一状态
+reg [AXI_ADDR_WIDTH-1:0] fifo_base_addr_reg = 0, fifo_base_addr_next; // 生效中的FIFO基地址配置
+reg [LEN_WIDTH-1:0] fifo_size_mask_reg = 0, fifo_size_mask_next; // 生效中的FIFO尺寸掩码配置
 
 assign sts_reset = fifo_reset_reg;
 assign sts_active = fifo_enable_reg;
 
-wire [LEN_WIDTH+1-1:0] wr_start_ptr;
-wire [LEN_WIDTH+1-1:0] wr_finish_ptr;
-wire [LEN_WIDTH+1-1:0] rd_start_ptr;
-wire [LEN_WIDTH+1-1:0] rd_finish_ptr;
+wire [LEN_WIDTH+1-1:0] wr_start_ptr; // 写侧已申请写出的起始指针（提供给读侧作边界）
+wire [LEN_WIDTH+1-1:0] wr_finish_ptr; // 写侧已完成写入的指针（B响应确认）
+wire [LEN_WIDTH+1-1:0] rd_start_ptr; // 读侧已申请读取的起始指针（提供给写侧作空间计算）
+wire [LEN_WIDTH+1-1:0] rd_finish_ptr; // 读侧已完成读取的指针（R通道接收确认）
 
 axi_vfifo_raw_wr #(
     .SEG_WIDTH(SEG_WIDTH),
@@ -188,7 +194,7 @@ axi_vfifo_raw_wr_inst (
     .rst(rst),
 
     /*
-     * Segmented data input (from encode logic)
+     * 分段数据输入（来自编码逻辑）
      */
     .input_clk(input_clk),
     .input_rst(input_rst),
@@ -199,7 +205,7 @@ axi_vfifo_raw_wr_inst (
     .input_ready(input_ready),
 
     /*
-     * AXI master interface
+     * AXI 主接口
      */
     .m_axi_awid(m_axi_awid),
     .m_axi_awaddr(m_axi_awaddr),
@@ -222,7 +228,7 @@ axi_vfifo_raw_wr_inst (
     .m_axi_bready(m_axi_bready),
 
     /*
-     * FIFO control
+     * FIFO 控制
      */
     .wr_start_ptr_out(wr_start_ptr),
     .wr_finish_ptr_out(wr_finish_ptr),
@@ -230,7 +236,7 @@ axi_vfifo_raw_wr_inst (
     .rd_finish_ptr_in(rd_finish_ptr),
 
     /*
-     * Configuration
+     * 配置
      */
     .cfg_fifo_base_addr(fifo_base_addr_reg),
     .cfg_fifo_size_mask(fifo_size_mask_reg),
@@ -238,7 +244,7 @@ axi_vfifo_raw_wr_inst (
     .cfg_reset(fifo_reset_reg),
 
     /*
-     * Status
+     * 状态
      */
     .sts_fifo_occupancy(sts_fifo_occupancy),
     .sts_fifo_empty(sts_fifo_empty),
@@ -264,7 +270,7 @@ axi_vfifo_raw_rd_inst (
     .rst(rst),
 
     /*
-     * Segmented data output (to decode logic)
+     * 分段数据输出（到解码逻辑）
      */
     .output_clk(output_clk),
     .output_rst(output_rst),
@@ -277,7 +283,7 @@ axi_vfifo_raw_rd_inst (
     .output_ctrl_ready(output_ctrl_ready),
 
     /*
-     * AXI master interface
+     * AXI 主接口
      */
     .m_axi_arid(m_axi_arid),
     .m_axi_araddr(m_axi_araddr),
@@ -297,7 +303,7 @@ axi_vfifo_raw_rd_inst (
     .m_axi_rready(m_axi_rready),
 
     /*
-     * FIFO control
+     * FIFO 控制
      */
     .wr_start_ptr_in(wr_start_ptr),
     .wr_finish_ptr_in(wr_finish_ptr),
@@ -305,7 +311,7 @@ axi_vfifo_raw_rd_inst (
     .rd_finish_ptr_out(rd_finish_ptr),
 
     /*
-     * Configuration
+     * 配置
      */
     .cfg_fifo_base_addr(fifo_base_addr_reg),
     .cfg_fifo_size_mask(fifo_size_mask_reg),
@@ -313,18 +319,18 @@ axi_vfifo_raw_rd_inst (
     .cfg_reset(fifo_reset_reg),
 
     /*
-     * Status
+     * 状态
      */
     .sts_read_active(sts_read_active)
 );
 
-// reset synchronization
+// 复位同步
 assign rst_req_out = rst | input_rst | output_rst | cfg_reset;
 
-wire rst_req_int = rst_req_in | rst_req_out;
+wire rst_req_int = rst_req_in | rst_req_out; // 本地复位请求总线（本模块请求与外部请求或并）
 
 (* shreg_extract = "no" *)
-reg rst_sync_1_reg = 1'b1,  rst_sync_2_reg = 1'b1, rst_sync_3_reg = 1'b1;
+reg rst_sync_1_reg = 1'b1,  rst_sync_2_reg = 1'b1, rst_sync_3_reg = 1'b1; // clk域三级复位同步链
 
 always @(posedge clk or posedge rst_req_int) begin
     if (rst_req_int) begin
@@ -339,7 +345,7 @@ always @(posedge clk) begin
     rst_sync_3_reg <= rst_sync_2_reg;
 end
 
-// reset and enable logic
+// 复位与使能控制逻辑
 always @* begin
     fifo_reset_next = 1'b0;
     fifo_enable_next = fifo_enable_reg;
@@ -352,7 +358,7 @@ always @* begin
 
     if (fifo_reset_reg) begin
         fifo_enable_next = 1'b0;
-        // hold reset until everything is flushed
+        // 保持复位，直到在途读写全部冲刷完成
         if (sts_write_active || sts_read_active) begin
             fifo_reset_next = 1'b1;
         end

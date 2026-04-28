@@ -22,101 +22,106 @@ THE SOFTWARE.
 
 */
 
-// Language: Verilog 2001
+// 语言: Verilog 2001
 
 `resetall
 `timescale 1ns / 1ps
 `default_nettype none
 
 /*
- * AXI4 virtual FIFO (raw, write side)
+ * AXI4 虚拟 FIFO（原始写侧）
+ *
+ * 模块目录：
+ * 1) 在 input_clk 域接收分段输入数据并写入分段异步 FIFO。
+ * 2) 在 clk 域按突发策略从输入 FIFO 取数，经 AXI AW/W/B 写入外部存储。
+ * 3) 维护写侧起始/完成指针，并根据读侧完成指针计算可用空间与满空状态。
  */
 module axi_vfifo_raw_wr #
 (
-    // Width of input segment
+    // 输入分段位宽
     parameter SEG_WIDTH = 32,
-    // Segment count
+    // 分段数量
     parameter SEG_CNT = 2,
-    // Width of AXI data bus in bits
+    // AXI 数据总线位宽
     parameter AXI_DATA_WIDTH = SEG_WIDTH*SEG_CNT,
-    // Width of AXI address bus in bits
+    // AXI 地址总线位宽
     parameter AXI_ADDR_WIDTH = 16,
-    // Width of AXI wstrb (width of data bus in words)
+    // AXI WSTRB 位宽（按字节）
     parameter AXI_STRB_WIDTH = (AXI_DATA_WIDTH/8),
-    // Width of AXI ID signal
+    // AXI ID 位宽
     parameter AXI_ID_WIDTH = 8,
-    // Maximum AXI burst length to generate
+    // 允许生成的 AXI 最大突发长度
     parameter AXI_MAX_BURST_LEN = 16,
-    // Width of length field
+    // 长度字段位宽
     parameter LEN_WIDTH = AXI_ADDR_WIDTH,
-    // Input FIFO depth for AXI write data (full-width words)
+    // AXI 写数据输入 FIFO 深度（全宽字）
     parameter WRITE_FIFO_DEPTH = 64,
-    // Max AXI write burst length
+    // AXI 最大写突发长度
     parameter WRITE_MAX_BURST_LEN = WRITE_FIFO_DEPTH/4,
-    // Watermark level
+    // 水位阈值
     parameter WATERMARK_LEVEL = WRITE_FIFO_DEPTH/2
 )
 (
-    input  wire                          clk,
-    input  wire                          rst,
+    input  wire                          clk, // AXI写侧主时钟（核心控制与AXI主口时序）
+    input  wire                          rst, // AXI写侧主复位（同步清空状态机和寄存器）
 
     /*
-     * Segmented data input (from encode logic)
+     * 分段数据输入（来自编码逻辑）
      */
-    input  wire                          input_clk,
-    input  wire                          input_rst,
-    output wire                          input_rst_out,
-    output wire                          input_watermark,
-    input  wire [SEG_CNT*SEG_WIDTH-1:0]  input_data,
-    input  wire [SEG_CNT-1:0]            input_valid,
-    output wire [SEG_CNT-1:0]            input_ready,
+    input  wire                          input_clk, // 分段输入域时钟（编码端/写入FIFO上游时钟）
+    input  wire                          input_rst, // 分段输入域复位
+    output wire                          input_rst_out, // 输出给输入域上游的同步复位请求
+    output wire                          input_watermark, // 输入域回压水位信号（FIFO趋近满时拉高）
+    input  wire [SEG_CNT*SEG_WIDTH-1:0]  input_data, // 分段输入数据总线
+    input  wire [SEG_CNT-1:0]            input_valid, // 各分段输入有效
+    output wire [SEG_CNT-1:0]            input_ready, // 各分段输入就绪
 
     /*
-     * AXI master interface
+     * AXI 主接口
      */
-    output wire [AXI_ID_WIDTH-1:0]       m_axi_awid,
-    output wire [AXI_ADDR_WIDTH-1:0]     m_axi_awaddr,
-    output wire [7:0]                    m_axi_awlen,
-    output wire [2:0]                    m_axi_awsize,
-    output wire [1:0]                    m_axi_awburst,
-    output wire                          m_axi_awlock,
-    output wire [3:0]                    m_axi_awcache,
-    output wire [2:0]                    m_axi_awprot,
-    output wire                          m_axi_awvalid,
-    input  wire                          m_axi_awready,
-    output wire [AXI_DATA_WIDTH-1:0]     m_axi_wdata,
-    output wire [AXI_STRB_WIDTH-1:0]     m_axi_wstrb,
-    output wire                          m_axi_wlast,
-    output wire                          m_axi_wvalid,
-    input  wire                          m_axi_wready,
-    input  wire [AXI_ID_WIDTH-1:0]       m_axi_bid,
-    input  wire [1:0]                    m_axi_bresp,
-    input  wire                          m_axi_bvalid,
-    output wire                          m_axi_bready,
+    output wire [AXI_ID_WIDTH-1:0]       m_axi_awid, // AXI写地址通道ID（本模块固定输出0）
+    output wire [AXI_ADDR_WIDTH-1:0]     m_axi_awaddr, // AXI写地址
+    output wire [7:0]                    m_axi_awlen, // AXI 写突发长度（拍数减 1）
+    output wire [2:0]                    m_axi_awsize, // AXI写突发每拍字节数编码
+    output wire [1:0]                    m_axi_awburst, // AXI写突发类型（INCR）
+    output wire                          m_axi_awlock, // AXI锁访问信号（未使用，固定0）
+    output wire [3:0]                    m_axi_awcache, // AXI缓存属性
+    output wire [2:0]                    m_axi_awprot, // AXI保护属性
+    output wire                          m_axi_awvalid, // AXI写地址有效
+    input  wire                          m_axi_awready, // AXI写地址就绪
+    output wire [AXI_DATA_WIDTH-1:0]     m_axi_wdata, // AXI写数据
+    output wire [AXI_STRB_WIDTH-1:0]     m_axi_wstrb, // AXI写字节使能
+    output wire                          m_axi_wlast, // AXI写突发最后一拍标志
+    output wire                          m_axi_wvalid, // AXI写数据有效
+    input  wire                          m_axi_wready, // AXI写数据就绪
+    input  wire [AXI_ID_WIDTH-1:0]       m_axi_bid, // AXI写响应ID（本模块不使用）
+    input  wire [1:0]                    m_axi_bresp, // AXI写响应码（可用于错误检查）
+    input  wire                          m_axi_bvalid, // AXI写响应有效
+    output wire                          m_axi_bready, // AXI写响应就绪
 
     /*
-     * FIFO control
+     * FIFO 控制
      */
-    output wire [LEN_WIDTH+1-1:0]        wr_start_ptr_out,
-    output wire [LEN_WIDTH+1-1:0]        wr_finish_ptr_out,
-    input  wire [LEN_WIDTH+1-1:0]        rd_start_ptr_in,
-    input  wire [LEN_WIDTH+1-1:0]        rd_finish_ptr_in,
+    output wire [LEN_WIDTH+1-1:0]        wr_start_ptr_out, // 写侧起始指针（已申请写出的逻辑位置）
+    output wire [LEN_WIDTH+1-1:0]        wr_finish_ptr_out, // 写侧完成指针（收到B响应后确认写完的位置）
+    input  wire [LEN_WIDTH+1-1:0]        rd_start_ptr_in, // 读侧起始指针输入（预留接口，本模块未直接使用）
+    input  wire [LEN_WIDTH+1-1:0]        rd_finish_ptr_in, // 读侧完成指针输入（用于计算可用空间）
 
     /*
-     * Configuration
+     * 配置
      */
-    input  wire [AXI_ADDR_WIDTH-1:0]     cfg_fifo_base_addr,
-    input  wire [LEN_WIDTH-1:0]          cfg_fifo_size_mask,
-    input  wire                          cfg_enable,
-    input  wire                          cfg_reset,
+    input  wire [AXI_ADDR_WIDTH-1:0]     cfg_fifo_base_addr, // 环形FIFO在外部存储中的基地址
+    input  wire [LEN_WIDTH-1:0]          cfg_fifo_size_mask, // 环形FIFO地址掩码（大小需为2的幂）
+    input  wire                          cfg_enable, // 使能写路径
+    input  wire                          cfg_reset, // FIFO逻辑复位请求（保持时会清空读写指针）
 
     /*
-     * Status
+     * 状态
      */
-    output wire [LEN_WIDTH+1-1:0]        sts_fifo_occupancy,
-    output wire                          sts_fifo_empty,
-    output wire                          sts_fifo_full,
-    output wire                          sts_write_active
+    output wire [LEN_WIDTH+1-1:0]        sts_fifo_occupancy, // FIFO占用字节数估计（写起点-读完成点）
+    output wire                          sts_fifo_empty, // FIFO空状态
+    output wire                          sts_fifo_full, // FIFO满状态（无法再安全启动整块写突发）
+    output wire                          sts_write_active // 写侧活动状态（存在在途突发或未完成响应）
 );
 
 localparam AXI_BYTE_LANES = AXI_STRB_WIDTH;
@@ -132,17 +137,17 @@ localparam CYCLE_COUNT_WIDTH = LEN_WIDTH - AXI_BURST_SIZE + 1;
 localparam WRITE_FIFO_ADDR_WIDTH = $clog2(WRITE_FIFO_DEPTH);
 localparam RESP_FIFO_ADDR_WIDTH = 5;
 
-// mask(x) = (2**$clog2(x))-1
-// log2(min(x, y, z)) = (mask & mask & mask)+1
-// floor(log2(x)) = $clog2(x+1)-1
-// floor(log2(min(AXI_MAX_BURST_LEN, WRITE_MAX_BURST_LEN, 2**(WRITE_FIFO_ADDR_WIDTH-1), 4096/AXI_BYTE_LANES)))
+// 用于求最小值对数的辅助公式：mask(x) = (2**$clog2(x))-1
+// 用于求最小值对数的辅助公式：log2(min(x, y, z)) = (mask & mask & mask)+1
+// 用于求向下取整对数的辅助公式：floor(log2(x)) = $clog2(x+1)-1
+// 组合限制条件下的 floor(log2(min(...))) 计算说明
 localparam WRITE_MAX_BURST_LEN_INT = ((2**($clog2(AXI_MAX_BURST_LEN+1)-1)-1) & (2**($clog2(WRITE_MAX_BURST_LEN+1)-1)-1) & (2**(WRITE_FIFO_ADDR_WIDTH-1)-1) & ((4096/AXI_BYTE_LANES)-1)) + 1;
 localparam WRITE_MAX_BURST_SIZE_INT = WRITE_MAX_BURST_LEN_INT << AXI_BURST_SIZE;
 localparam WRITE_BURST_LEN_WIDTH = $clog2(WRITE_MAX_BURST_LEN_INT);
 localparam WRITE_BURST_ADDR_WIDTH = $clog2(WRITE_MAX_BURST_SIZE_INT);
 localparam WRITE_BURST_ADDR_MASK = WRITE_BURST_ADDR_WIDTH > 1 ? {WRITE_BURST_ADDR_WIDTH{1'b1}} : 0;
 
-// validate parameters
+// 参数检查
 initial begin
     if (AXI_BYTE_SIZE * AXI_STRB_WIDTH != AXI_DATA_WIDTH) begin
         $error("Error: AXI data width not evenly divisible (instance %m)");
@@ -171,14 +176,14 @@ localparam [1:0]
     AXI_RESP_SLVERR = 2'b10,
     AXI_RESP_DECERR = 2'b11;
 
-reg [AXI_ADDR_WIDTH-1:0] m_axi_awaddr_reg = {AXI_ADDR_WIDTH{1'b0}}, m_axi_awaddr_next;
-reg [7:0] m_axi_awlen_reg = 8'd0, m_axi_awlen_next;
-reg m_axi_awvalid_reg = 1'b0, m_axi_awvalid_next;
-reg [AXI_DATA_WIDTH-1:0] m_axi_wdata_reg = {AXI_DATA_WIDTH{1'b0}}, m_axi_wdata_next;
-reg [AXI_STRB_WIDTH-1:0] m_axi_wstrb_reg = {AXI_STRB_WIDTH{1'b0}}, m_axi_wstrb_next;
-reg m_axi_wlast_reg = 1'b0, m_axi_wlast_next;
-reg m_axi_wvalid_reg = 1'b0, m_axi_wvalid_next;
-reg m_axi_bready_reg = 1'b0, m_axi_bready_next;
+reg [AXI_ADDR_WIDTH-1:0] m_axi_awaddr_reg = {AXI_ADDR_WIDTH{1'b0}}, m_axi_awaddr_next; // AXI AW地址寄存器及其下一状态
+reg [7:0] m_axi_awlen_reg = 8'd0, m_axi_awlen_next; // AXI AWLEN寄存器及其下一状态
+reg m_axi_awvalid_reg = 1'b0, m_axi_awvalid_next; // AXI AWVALID寄存器及其下一状态
+reg [AXI_DATA_WIDTH-1:0] m_axi_wdata_reg = {AXI_DATA_WIDTH{1'b0}}, m_axi_wdata_next; // AXI WDATA寄存器及其下一状态
+reg [AXI_STRB_WIDTH-1:0] m_axi_wstrb_reg = {AXI_STRB_WIDTH{1'b0}}, m_axi_wstrb_next; // AXI WSTRB寄存器及其下一状态
+reg m_axi_wlast_reg = 1'b0, m_axi_wlast_next; // AXI WLAST寄存器及其下一状态
+reg m_axi_wvalid_reg = 1'b0, m_axi_wvalid_next; // AXI WVALID寄存器及其下一状态
+reg m_axi_bready_reg = 1'b0, m_axi_bready_next; // AXI BREADY寄存器及其下一状态
 
 assign m_axi_awid = {AXI_ID_WIDTH{1'b0}};
 assign m_axi_awaddr = m_axi_awaddr_reg;
@@ -195,11 +200,11 @@ assign m_axi_wvalid = m_axi_wvalid_reg;
 assign m_axi_wlast = m_axi_wlast_reg;
 assign m_axi_bready = m_axi_bready_reg;
 
-// reset synchronization
-wire rst_req_int = cfg_reset;
+// 复位同步
+wire rst_req_int = cfg_reset; // 输入域复位请求来源：配置复位
 
 (* shreg_extract = "no" *)
-reg rst_sync_1_reg = 1'b1,  rst_sync_2_reg = 1'b1, rst_sync_3_reg = 1'b1;
+reg rst_sync_1_reg = 1'b1,  rst_sync_2_reg = 1'b1, rst_sync_3_reg = 1'b1; // input_clk 域三级同步复位链
 
 assign input_rst_out = rst_sync_3_reg;
 
@@ -216,64 +221,64 @@ always @(posedge input_clk) begin
     rst_sync_3_reg <= rst_sync_2_reg;
 end
 
-// input datapath logic (write data)
-wire [AXI_DATA_WIDTH-1:0] input_data_int;
-reg input_valid_int_reg = 1'b0;
+// 输入数据通路逻辑（写数据）
+wire [AXI_DATA_WIDTH-1:0] input_data_int; // 由各段拼接出的整拍AXI写数据
+reg input_valid_int_reg = 1'b0; // input_data_int有效标志（clk域）
 
-reg input_read_en;
+reg input_read_en; // 读取输入FIFO一拍数据的使能（clk域）
 
-wire [WRITE_FIFO_ADDR_WIDTH+1-1:0] write_fifo_wr_ptr;
-wire [WRITE_FIFO_ADDR_WIDTH+1-1:0] write_fifo_wr_ptr_gray;
-reg [WRITE_FIFO_ADDR_WIDTH+1-1:0] write_fifo_rd_ptr_reg = 0;
-reg [WRITE_FIFO_ADDR_WIDTH+1-1:0] write_fifo_rd_ptr_gray_reg = 0;
+wire [WRITE_FIFO_ADDR_WIDTH+1-1:0] write_fifo_wr_ptr; // 输入侧写指针（二进制，来自最后一个段）
+wire [WRITE_FIFO_ADDR_WIDTH+1-1:0] write_fifo_wr_ptr_gray; // 输入侧写指针格雷码（用于 CDC 同步）
+reg [WRITE_FIFO_ADDR_WIDTH+1-1:0] write_fifo_rd_ptr_reg = 0; // 核心clk域读指针（二进制）
+reg [WRITE_FIFO_ADDR_WIDTH+1-1:0] write_fifo_rd_ptr_gray_reg = 0; // 核心 clk 域读指针格雷码
 
-reg [WRITE_FIFO_ADDR_WIDTH+1-1:0] write_fifo_rd_ptr_temp;
-
-(* shreg_extract = "no" *)
-reg [WRITE_FIFO_ADDR_WIDTH+1-1:0] write_fifo_wr_ptr_gray_sync_1_reg = 0;
-(* shreg_extract = "no" *)
-reg [WRITE_FIFO_ADDR_WIDTH+1-1:0] write_fifo_wr_ptr_gray_sync_2_reg = 0;
-reg [WRITE_FIFO_ADDR_WIDTH+1-1:0] write_fifo_wr_ptr_sync_reg = 0;
+reg [WRITE_FIFO_ADDR_WIDTH+1-1:0] write_fifo_rd_ptr_temp; // 读指针下一值临时变量
 
 (* shreg_extract = "no" *)
-reg [WRITE_FIFO_ADDR_WIDTH+1-1:0] write_fifo_rd_ptr_gray_sync_1_reg = 0;
+reg [WRITE_FIFO_ADDR_WIDTH+1-1:0] write_fifo_wr_ptr_gray_sync_1_reg = 0; // 写指针格雷码同步到 clk 域第 1 级
 (* shreg_extract = "no" *)
-reg [WRITE_FIFO_ADDR_WIDTH+1-1:0] write_fifo_rd_ptr_gray_sync_2_reg = 0;
-reg [WRITE_FIFO_ADDR_WIDTH+1-1:0] write_fifo_rd_ptr_sync_reg = 0;
+reg [WRITE_FIFO_ADDR_WIDTH+1-1:0] write_fifo_wr_ptr_gray_sync_2_reg = 0; // 写指针格雷码同步到 clk 域第 2 级
+reg [WRITE_FIFO_ADDR_WIDTH+1-1:0] write_fifo_wr_ptr_sync_reg = 0; // 同步后转换得到的写指针二进制值（clk域）
 
-reg [WRITE_FIFO_ADDR_WIDTH+1-1:0] write_fifo_occupancy_reg = 0;
+(* shreg_extract = "no" *)
+reg [WRITE_FIFO_ADDR_WIDTH+1-1:0] write_fifo_rd_ptr_gray_sync_1_reg = 0; // 读指针格雷码同步到 input_clk 域第 1 级
+(* shreg_extract = "no" *)
+reg [WRITE_FIFO_ADDR_WIDTH+1-1:0] write_fifo_rd_ptr_gray_sync_2_reg = 0; // 读指针格雷码同步到 input_clk 域第 2 级
+reg [WRITE_FIFO_ADDR_WIDTH+1-1:0] write_fifo_rd_ptr_sync_reg = 0; // 同步后转换得到的读指针二进制值（input_clk域）
 
-wire [SEG_CNT-1:0] write_fifo_seg_full;
-wire [SEG_CNT-1:0] write_fifo_seg_empty;
-wire [SEG_CNT-1:0] write_fifo_seg_watermark;
+reg [WRITE_FIFO_ADDR_WIDTH+1-1:0] write_fifo_occupancy_reg = 0; // 输入FIFO占用拍数（clk域估计）
 
-wire write_fifo_full = |write_fifo_seg_full;
-wire write_fifo_empty = |write_fifo_seg_empty;
+wire [SEG_CNT-1:0] write_fifo_seg_full; // 各段FIFO满标志
+wire [SEG_CNT-1:0] write_fifo_seg_empty; // 各段FIFO空标志
+wire [SEG_CNT-1:0] write_fifo_seg_watermark; // 各段FIFO水位超限标志
+
+wire write_fifo_full = |write_fifo_seg_full; // 任一段满即整体不可再写
+wire write_fifo_empty = |write_fifo_seg_empty; // 任一段空则整体不可组成完整一拍输出
 
 assign input_watermark = |write_fifo_seg_watermark | input_rst_out;
 
 genvar n;
-integer k;
+integer k; // 格雷码转二进制循环变量
 
 generate
 
 for (n = 0; n < SEG_CNT; n = n + 1) begin : write_fifo_seg
 
-    reg [WRITE_FIFO_ADDR_WIDTH+1-1:0] seg_wr_ptr_reg = 0;
-    reg [WRITE_FIFO_ADDR_WIDTH+1-1:0] seg_wr_ptr_gray_reg = 0;
+    reg [WRITE_FIFO_ADDR_WIDTH+1-1:0] seg_wr_ptr_reg = 0; // 当前段写指针（二进制，input_clk域）
+    reg [WRITE_FIFO_ADDR_WIDTH+1-1:0] seg_wr_ptr_gray_reg = 0; // 当前段写指针格雷码
 
-    reg [WRITE_FIFO_ADDR_WIDTH+1-1:0] seg_wr_ptr_temp;
+    reg [WRITE_FIFO_ADDR_WIDTH+1-1:0] seg_wr_ptr_temp; // 当前段写指针下一值临时变量
 
-    reg [WRITE_FIFO_ADDR_WIDTH+1-1:0] seg_occupancy_reg = 0;
+    reg [WRITE_FIFO_ADDR_WIDTH+1-1:0] seg_occupancy_reg = 0; // 当前段FIFO占用深度
 
     (* ram_style = "distributed", ramstyle = "no_rw_check, mlab" *)
-    reg [SEG_WIDTH-1:0] seg_mem_data[2**WRITE_FIFO_ADDR_WIDTH-1:0];
+    reg [SEG_WIDTH-1:0] seg_mem_data[2**WRITE_FIFO_ADDR_WIDTH-1:0]; // 当前段分布式RAM，存储分段输入数据
 
-    reg [SEG_WIDTH-1:0] seg_rd_data_reg = 0;
+    reg [SEG_WIDTH-1:0] seg_rd_data_reg = 0; // 当前段从RAM读出的数据，参与拼接input_data_int
 
-    wire seg_full = seg_wr_ptr_gray_reg == (write_fifo_rd_ptr_gray_sync_2_reg ^ {2'b11, {WRITE_FIFO_ADDR_WIDTH-1{1'b0}}});
-    wire seg_empty = write_fifo_rd_ptr_reg == write_fifo_wr_ptr_sync_reg;
-    wire seg_watermark = seg_occupancy_reg > WATERMARK_LEVEL;
+    wire seg_full = seg_wr_ptr_gray_reg == (write_fifo_rd_ptr_gray_sync_2_reg ^ {2'b11, {WRITE_FIFO_ADDR_WIDTH-1{1'b0}}}); // 当前段满标志（格雷码环形满判定）
+    wire seg_empty = write_fifo_rd_ptr_reg == write_fifo_wr_ptr_sync_reg; // 当前段空标志（读写指针相等）
+    wire seg_watermark = seg_occupancy_reg > WATERMARK_LEVEL; // 当前段水位超阈值标志
 
     assign input_data_int[n*SEG_WIDTH +: SEG_WIDTH] = seg_rd_data_reg;
 
@@ -288,7 +293,7 @@ for (n = 0; n < SEG_CNT; n = n + 1) begin : write_fifo_seg
         assign write_fifo_wr_ptr_gray = seg_wr_ptr_gray_reg;
     end
 
-    // per-segment write logic
+    // 分段写入逻辑
     always @(posedge input_clk) begin
         seg_occupancy_reg <= seg_wr_ptr_reg - write_fifo_rd_ptr_sync_reg;
 
@@ -316,7 +321,7 @@ end
 
 endgenerate
 
-// pointer synchronization
+// 指针同步逻辑
 always @(posedge input_clk) begin
     write_fifo_rd_ptr_gray_sync_1_reg <= write_fifo_rd_ptr_gray_reg;
     write_fifo_rd_ptr_gray_sync_2_reg <= write_fifo_rd_ptr_gray_sync_1_reg;
@@ -347,7 +352,7 @@ always @(posedge clk) begin
     end
 end
 
-// read logic
+// 读出拼接逻辑
 always @(posedge clk) begin
     write_fifo_occupancy_reg <= write_fifo_wr_ptr_sync_reg - write_fifo_rd_ptr_reg + input_valid_int_reg;
 
@@ -373,43 +378,43 @@ always @(posedge clk) begin
     end
 end
 
-reg [WRITE_BURST_LEN_WIDTH+1-1:0] wr_burst_len;
-reg [LEN_WIDTH+1-1:0] wr_start_ptr;
-reg [LEN_WIDTH+1-1:0] wr_start_ptr_blk_adj;
-reg wr_burst_reg = 1'b0, wr_burst_next;
-reg [WRITE_BURST_LEN_WIDTH-1:0] wr_burst_len_reg = 0, wr_burst_len_next;
-reg [7:0] wr_timeout_count_reg = 0, wr_timeout_count_next;
-reg wr_timeout_reg = 0, wr_timeout_next;
-reg fifo_full_wr_blk_adj_reg = 1'b0, fifo_full_wr_blk_adj_next;
+reg [WRITE_BURST_LEN_WIDTH+1-1:0] wr_burst_len; // 本轮组合逻辑计算的突发长度（拍数减 1）
+reg [LEN_WIDTH+1-1:0] wr_start_ptr; // 本轮候选写起始指针（按当前占用推进后）
+reg [LEN_WIDTH+1-1:0] wr_start_ptr_blk_adj; // 以突发块边界对齐后的候选写起始指针（用于满判断）
+reg wr_burst_reg = 1'b0, wr_burst_next; // 当前是否正在发送一个写突发
+reg [WRITE_BURST_LEN_WIDTH-1:0] wr_burst_len_reg = 0, wr_burst_len_next; // 当前写突发剩余长度计数
+reg [7:0] wr_timeout_count_reg = 0, wr_timeout_count_next; // 部分突发超时计数器
+reg wr_timeout_reg = 0, wr_timeout_next; // 超时触发标志，允许非满突发启动写出
+reg fifo_full_wr_blk_adj_reg = 1'b0, fifo_full_wr_blk_adj_next; // 基于块对齐指针的FIFO满状态寄存
 
-reg [LEN_WIDTH+1-1:0] wr_start_ptr_reg = 0, wr_start_ptr_next;
-reg [LEN_WIDTH+1-1:0] wr_start_ptr_blk_adj_reg = 0, wr_start_ptr_blk_adj_next;
-reg [LEN_WIDTH+1-1:0] wr_finish_ptr_reg = 0, wr_finish_ptr_next;
+reg [LEN_WIDTH+1-1:0] wr_start_ptr_reg = 0, wr_start_ptr_next; // 已申请写出的逻辑起始指针
+reg [LEN_WIDTH+1-1:0] wr_start_ptr_blk_adj_reg = 0, wr_start_ptr_blk_adj_next; // 已申请写出的块对齐指针
+reg [LEN_WIDTH+1-1:0] wr_finish_ptr_reg = 0, wr_finish_ptr_next; // 已收到B响应确认完成的写指针
 
-reg resp_fifo_we_reg = 1'b0, resp_fifo_we_next;
-reg [RESP_FIFO_ADDR_WIDTH+1-1:0] resp_fifo_wr_ptr_reg = 0;
-reg [RESP_FIFO_ADDR_WIDTH+1-1:0] resp_fifo_rd_ptr_reg = 0, resp_fifo_rd_ptr_next;
-reg [WRITE_BURST_LEN_WIDTH+1-1:0] resp_fifo_burst_len[(2**RESP_FIFO_ADDR_WIDTH)-1:0];
-reg [WRITE_BURST_LEN_WIDTH+1-1:0] resp_fifo_wr_burst_len_reg = 0, resp_fifo_wr_burst_len_next;
+reg resp_fifo_we_reg = 1'b0, resp_fifo_we_next; // 写响应跟踪FIFO写使能
+reg [RESP_FIFO_ADDR_WIDTH+1-1:0] resp_fifo_wr_ptr_reg = 0; // 写响应跟踪FIFO写指针
+reg [RESP_FIFO_ADDR_WIDTH+1-1:0] resp_fifo_rd_ptr_reg = 0, resp_fifo_rd_ptr_next; // 写响应跟踪FIFO读指针
+reg [WRITE_BURST_LEN_WIDTH+1-1:0] resp_fifo_burst_len[(2**RESP_FIFO_ADDR_WIDTH)-1:0]; // 写响应跟踪FIFO内容：每个已发AW的突发长度
+reg [WRITE_BURST_LEN_WIDTH+1-1:0] resp_fifo_wr_burst_len_reg = 0, resp_fifo_wr_burst_len_next; // 将写入响应FIFO的突发长度寄存
 
 assign wr_start_ptr_out = wr_start_ptr_reg;
 assign wr_finish_ptr_out = wr_finish_ptr_reg;
 
-// FIFO occupancy using adjusted write start pointer
-wire [LEN_WIDTH+1-1:0] fifo_occupancy_wr_blk_adj = wr_start_ptr_blk_adj_reg - rd_finish_ptr_in;
-// FIFO full indication - no space to start writing a complete block
-wire fifo_full_wr_blk_adj = (fifo_occupancy_wr_blk_adj & ~cfg_fifo_size_mask) || ((~fifo_occupancy_wr_blk_adj & cfg_fifo_size_mask & ~WRITE_BURST_ADDR_MASK) == 0 && (fifo_occupancy_wr_blk_adj & WRITE_BURST_ADDR_MASK));
+// 使用块对齐写起点计算 FIFO 占用量
+wire [LEN_WIDTH+1-1:0] fifo_occupancy_wr_blk_adj = wr_start_ptr_blk_adj_reg - rd_finish_ptr_in; // 以块对齐写指针估计的占用
+// FIFO 满判定：是否还有空间启动一个完整写块
+wire fifo_full_wr_blk_adj = (fifo_occupancy_wr_blk_adj & ~cfg_fifo_size_mask) || ((~fifo_occupancy_wr_blk_adj & cfg_fifo_size_mask & ~WRITE_BURST_ADDR_MASK) == 0 && (fifo_occupancy_wr_blk_adj & WRITE_BURST_ADDR_MASK)); // 预留整突发空间后是否判满
 
-// FIFO occupancy (including all in-progress reads and writes)
+// FIFO 占用量（包含在途读写）
 assign sts_fifo_occupancy = wr_start_ptr_reg - rd_finish_ptr_in;
-// FIFO empty (including all in-progress reads and writes)
+// FIFO 空判定（包含在途读写）
 assign sts_fifo_empty = wr_start_ptr_reg == rd_finish_ptr_in;
-// FIFO full
+// FIFO 满判定
 assign sts_fifo_full = fifo_full_wr_blk_adj_reg;
 
 assign sts_write_active = wr_burst_reg || resp_fifo_we_reg || (resp_fifo_wr_ptr_reg != resp_fifo_rd_ptr_reg);
 
-// write logic
+// 写控制逻辑
 always @* begin
     wr_start_ptr_next = wr_start_ptr_reg;
     wr_start_ptr_blk_adj_next = wr_start_ptr_blk_adj_reg;
@@ -439,7 +444,7 @@ always @* begin
 
     m_axi_bready_next = 1'b0;
 
-    // partial burst timeout handling
+    // 非满突发超时处理
     wr_timeout_next = wr_timeout_count_reg == 0;
     if (!input_valid_int_reg || m_axi_awvalid) begin
         wr_timeout_count_next = 8'hff;
@@ -448,14 +453,14 @@ always @* begin
         wr_timeout_count_next = wr_timeout_count_reg - 1;
     end
 
-    // compute length based on input FIFO occupancy
+    // 按输入 FIFO 占用量计算本次突发长度
     if ((((wr_start_ptr_reg & WRITE_BURST_ADDR_MASK) >> AXI_BURST_SIZE) + write_fifo_occupancy_reg) >> WRITE_BURST_LEN_WIDTH != 0) begin
-        // crosses burst boundary, write up to burst boundary
+        // 跨越突发边界：写到边界为止
         wr_burst_len = WRITE_MAX_BURST_LEN_INT-1 - ((wr_start_ptr_reg & WRITE_BURST_ADDR_MASK) >> AXI_BURST_SIZE);
         wr_start_ptr = (wr_start_ptr_reg & ~WRITE_BURST_ADDR_MASK) + (1 << WRITE_BURST_ADDR_WIDTH);
         wr_start_ptr_blk_adj = (wr_start_ptr_reg & ~WRITE_BURST_ADDR_MASK) + (1 << WRITE_BURST_ADDR_WIDTH);
     end else begin
-        // does not cross burst boundary, write available data
+        // 未跨越突发边界：写入当前可用数据
         wr_burst_len = write_fifo_occupancy_reg-1;
         wr_start_ptr = wr_start_ptr_reg + (write_fifo_occupancy_reg << AXI_BURST_SIZE);
         wr_start_ptr_blk_adj = (wr_start_ptr_reg & ~WRITE_BURST_ADDR_MASK) + (1 << WRITE_BURST_ADDR_WIDTH);
@@ -463,9 +468,9 @@ always @* begin
 
     resp_fifo_wr_burst_len_next = wr_burst_len;
 
-    // generate AXI write bursts
+    // 生成 AXI 写突发
     if (!m_axi_awvalid_reg && !wr_burst_reg) begin
-        // ready to start new burst
+        // 可以启动新突发
 
         wr_burst_len_next = wr_burst_len;
 
@@ -473,9 +478,9 @@ always @* begin
         m_axi_awlen_next = wr_burst_len;
 
         if (cfg_enable && input_valid_int_reg && !fifo_full_wr_blk_adj_reg) begin
-            // enabled, have data to write, have space for data
+            // 已使能，且有数据可写，同时有空间可写
             if ((write_fifo_occupancy_reg) >> WRITE_BURST_LEN_WIDTH != 0 || wr_timeout_reg) begin
-                // have full burst or timed out
+                // 满突发可发起，或已超时允许发起非满突发
                 wr_burst_next = 1'b1;
                 m_axi_awvalid_next = 1'b1;
                 resp_fifo_we_next = 1'b1;
@@ -486,7 +491,7 @@ always @* begin
     end
 
     if (!m_axi_wvalid_reg || m_axi_wready) begin
-        // transfer data
+        // 传输写数据
         m_axi_wdata_next = input_data_int;
         m_axi_wlast_next = wr_burst_len_reg == 0;
 
@@ -506,7 +511,7 @@ always @* begin
         end
     end
 
-    // handle AXI write completions
+    // 处理 AXI 写完成
     m_axi_bready_next = 1'b1;
     if (m_axi_bvalid) begin
         wr_finish_ptr_next = wr_finish_ptr_reg + ((resp_fifo_burst_len[resp_fifo_rd_ptr_reg[RESP_FIFO_ADDR_WIDTH-1:0]]+1) << AXI_BURST_SIZE);

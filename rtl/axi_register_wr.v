@@ -22,148 +22,154 @@ THE SOFTWARE.
 
 */
 
-// Language: Verilog 2001
+// 语言: Verilog 2001
 
 `resetall
 `timescale 1ns / 1ps
 `default_nettype none
 
 /*
- * AXI4 register (write)
+ * AXI4 寄存器切片（写通道）
+ *
+ * 模块目录
+ * 1) AW 通道可选缓冲（旁路/简单寄存/skid）。
+ * 2) W 通道可选缓冲（旁路/简单寄存/skid）。
+ * 3) B 通道可选缓冲（旁路/简单寄存/skid）。
+ * 4) 在保持 AXI 写语义不变的前提下切断关键时序路径。
  */
 module axi_register_wr #
 (
-    // Width of data bus in bits
+    // 数据总线位宽
     parameter DATA_WIDTH = 32,
-    // Width of address bus in bits
+    // 地址总线位宽
     parameter ADDR_WIDTH = 32,
-    // Width of wstrb (width of data bus in words)
+    // WSTRB 位宽（按字节）
     parameter STRB_WIDTH = (DATA_WIDTH/8),
-    // Width of ID signal
+    // ID 信号位宽
     parameter ID_WIDTH = 8,
-    // Propagate awuser signal
+    // 是否透传 AWUSER 信号
     parameter AWUSER_ENABLE = 0,
-    // Width of awuser signal
+    // AWUSER 信号位宽
     parameter AWUSER_WIDTH = 1,
-    // Propagate wuser signal
+    // 是否透传 WUSER 信号
     parameter WUSER_ENABLE = 0,
-    // Width of wuser signal
+    // WUSER 信号位宽
     parameter WUSER_WIDTH = 1,
-    // Propagate buser signal
+    // 是否透传 BUSER 信号
     parameter BUSER_ENABLE = 0,
-    // Width of buser signal
+    // BUSER 信号位宽
     parameter BUSER_WIDTH = 1,
-    // AW channel register type
-    // 0 to bypass, 1 for simple buffer, 2 for skid buffer
+    // AW 通道寄存类型
+    // 0 表示旁路，1 表示简单缓冲，2 表示 skid buffer
     parameter AW_REG_TYPE = 1,
-    // W channel register type
-    // 0 to bypass, 1 for simple buffer, 2 for skid buffer
+    // W 通道寄存类型
+    // 0 表示旁路，1 表示简单缓冲，2 表示 skid buffer
     parameter W_REG_TYPE = 2,
-    // B channel register type
-    // 0 to bypass, 1 for simple buffer, 2 for skid buffer
+    // B 通道寄存类型
+    // 0 表示旁路，1 表示简单缓冲，2 表示 skid buffer
     parameter B_REG_TYPE = 1
 )
 (
-    input  wire                     clk,
-    input  wire                     rst,
+    input  wire                     clk, // 写路径寄存切片时钟。
+    input  wire                     rst, // AW/W/B 通道缓冲状态同步复位。
 
     /*
-     * AXI slave interface
+     * AXI 从接口
      */
-    input  wire [ID_WIDTH-1:0]      s_axi_awid,
-    input  wire [ADDR_WIDTH-1:0]    s_axi_awaddr,
-    input  wire [7:0]               s_axi_awlen,
-    input  wire [2:0]               s_axi_awsize,
-    input  wire [1:0]               s_axi_awburst,
-    input  wire                     s_axi_awlock,
-    input  wire [3:0]               s_axi_awcache,
-    input  wire [2:0]               s_axi_awprot,
-    input  wire [3:0]               s_axi_awqos,
-    input  wire [3:0]               s_axi_awregion,
-    input  wire [AWUSER_WIDTH-1:0]  s_axi_awuser,
-    input  wire                     s_axi_awvalid,
-    output wire                     s_axi_awready,
-    input  wire [DATA_WIDTH-1:0]    s_axi_wdata,
-    input  wire [STRB_WIDTH-1:0]    s_axi_wstrb,
-    input  wire                     s_axi_wlast,
-    input  wire [WUSER_WIDTH-1:0]   s_axi_wuser,
-    input  wire                     s_axi_wvalid,
-    output wire                     s_axi_wready,
-    output wire [ID_WIDTH-1:0]      s_axi_bid,
-    output wire [1:0]               s_axi_bresp,
-    output wire [BUSER_WIDTH-1:0]   s_axi_buser,
-    output wire                     s_axi_bvalid,
-    input  wire                     s_axi_bready,
+    input  wire [ID_WIDTH-1:0]      s_axi_awid, // 从侧 AW ID。
+    input  wire [ADDR_WIDTH-1:0]    s_axi_awaddr, // 从侧 AW 地址。
+    input  wire [7:0]               s_axi_awlen, // 从侧 AW 突发长度。
+    input  wire [2:0]               s_axi_awsize, // 从侧 AW 突发粒度。
+    input  wire [1:0]               s_axi_awburst, // 从侧 AW 突发类型。
+    input  wire                     s_axi_awlock, // 从侧 AW 锁属性。
+    input  wire [3:0]               s_axi_awcache, // 从侧 AW cache 属性。
+    input  wire [2:0]               s_axi_awprot, // 从侧 AW 保护属性。
+    input  wire [3:0]               s_axi_awqos, // 从侧 AW QoS。
+    input  wire [3:0]               s_axi_awregion, // 从侧 AW region。
+    input  wire [AWUSER_WIDTH-1:0]  s_axi_awuser, // 从侧 AW 用户旁带。
+    input  wire                     s_axi_awvalid, // 从侧 AWVALID。
+    output wire                     s_axi_awready, // 从侧 AWREADY。
+    input  wire [DATA_WIDTH-1:0]    s_axi_wdata, // 从侧 W 数据。
+    input  wire [STRB_WIDTH-1:0]    s_axi_wstrb, // 从侧 W 字节使能。
+    input  wire                     s_axi_wlast, // 从侧 WLAST。
+    input  wire [WUSER_WIDTH-1:0]   s_axi_wuser, // 从侧 W 用户旁带。
+    input  wire                     s_axi_wvalid, // 从侧 WVALID。
+    output wire                     s_axi_wready, // 从侧 WREADY。
+    output wire [ID_WIDTH-1:0]      s_axi_bid, // 从侧 B ID。
+    output wire [1:0]               s_axi_bresp, // 从侧 B 响应。
+    output wire [BUSER_WIDTH-1:0]   s_axi_buser, // 从侧 B 用户旁带。
+    output wire                     s_axi_bvalid, // 从侧 BVALID。
+    input  wire                     s_axi_bready, // 从侧 BREADY。
 
     /*
-     * AXI master interface
+     * AXI 主接口
      */
-    output wire [ID_WIDTH-1:0]      m_axi_awid,
-    output wire [ADDR_WIDTH-1:0]    m_axi_awaddr,
-    output wire [7:0]               m_axi_awlen,
-    output wire [2:0]               m_axi_awsize,
-    output wire [1:0]               m_axi_awburst,
-    output wire                     m_axi_awlock,
-    output wire [3:0]               m_axi_awcache,
-    output wire [2:0]               m_axi_awprot,
-    output wire [3:0]               m_axi_awqos,
-    output wire [3:0]               m_axi_awregion,
-    output wire [AWUSER_WIDTH-1:0]  m_axi_awuser,
-    output wire                     m_axi_awvalid,
-    input  wire                     m_axi_awready,
-    output wire [DATA_WIDTH-1:0]    m_axi_wdata,
-    output wire [STRB_WIDTH-1:0]    m_axi_wstrb,
-    output wire                     m_axi_wlast,
-    output wire [WUSER_WIDTH-1:0]   m_axi_wuser,
-    output wire                     m_axi_wvalid,
-    input  wire                     m_axi_wready,
-    input  wire [ID_WIDTH-1:0]      m_axi_bid,
-    input  wire [1:0]               m_axi_bresp,
-    input  wire [BUSER_WIDTH-1:0]   m_axi_buser,
-    input  wire                     m_axi_bvalid,
-    output wire                     m_axi_bready
+    output wire [ID_WIDTH-1:0]      m_axi_awid, // 主侧 AW ID。
+    output wire [ADDR_WIDTH-1:0]    m_axi_awaddr, // 主侧 AW 地址。
+    output wire [7:0]               m_axi_awlen, // 主侧 AW 突发长度。
+    output wire [2:0]               m_axi_awsize, // 主侧 AW 突发粒度。
+    output wire [1:0]               m_axi_awburst, // 主侧 AW 突发类型。
+    output wire                     m_axi_awlock, // 主侧 AW 锁属性。
+    output wire [3:0]               m_axi_awcache, // 主侧 AW cache 属性。
+    output wire [2:0]               m_axi_awprot, // 主侧 AW 保护属性。
+    output wire [3:0]               m_axi_awqos, // 主侧 AW QoS。
+    output wire [3:0]               m_axi_awregion, // 主侧 AW region。
+    output wire [AWUSER_WIDTH-1:0]  m_axi_awuser, // 主侧 AW 用户旁带。
+    output wire                     m_axi_awvalid, // 主侧 AWVALID。
+    input  wire                     m_axi_awready, // 主侧 AWREADY。
+    output wire [DATA_WIDTH-1:0]    m_axi_wdata, // 主侧 W 数据。
+    output wire [STRB_WIDTH-1:0]    m_axi_wstrb, // 主侧 W 字节使能。
+    output wire                     m_axi_wlast, // 主侧 WLAST。
+    output wire [WUSER_WIDTH-1:0]   m_axi_wuser, // 主侧 W 用户旁带。
+    output wire                     m_axi_wvalid, // 主侧 WVALID。
+    input  wire                     m_axi_wready, // 主侧 WREADY。
+    input  wire [ID_WIDTH-1:0]      m_axi_bid, // 主侧 B ID。
+    input  wire [1:0]               m_axi_bresp, // 主侧 B 响应。
+    input  wire [BUSER_WIDTH-1:0]   m_axi_buser, // 主侧 B 用户旁带。
+    input  wire                     m_axi_bvalid, // 主侧 BVALID。
+    output wire                     m_axi_bready // 主侧 BREADY。
 );
 
 generate
 
-// AW channel
+// AW 通道
 
 if (AW_REG_TYPE > 1) begin
-// skid buffer, no bubble cycles
+// skid buffer，无气泡周期
 
-// datapath registers
-reg                    s_axi_awready_reg = 1'b0;
+// 数据通路寄存器
+reg                    s_axi_awready_reg = 1'b0; // skid 模式下从侧 AWREADY 寄存器。
 
-reg [ID_WIDTH-1:0]     m_axi_awid_reg     = {ID_WIDTH{1'b0}};
-reg [ADDR_WIDTH-1:0]   m_axi_awaddr_reg   = {ADDR_WIDTH{1'b0}};
-reg [7:0]              m_axi_awlen_reg    = 8'd0;
-reg [2:0]              m_axi_awsize_reg   = 3'd0;
-reg [1:0]              m_axi_awburst_reg  = 2'd0;
-reg                    m_axi_awlock_reg   = 1'b0;
-reg [3:0]              m_axi_awcache_reg  = 4'd0;
-reg [2:0]              m_axi_awprot_reg   = 3'd0;
-reg [3:0]              m_axi_awqos_reg    = 4'd0;
-reg [3:0]              m_axi_awregion_reg = 4'd0;
-reg [AWUSER_WIDTH-1:0] m_axi_awuser_reg   = {AWUSER_WIDTH{1'b0}};
-reg                    m_axi_awvalid_reg  = 1'b0, m_axi_awvalid_next;
+reg [ID_WIDTH-1:0]     m_axi_awid_reg     = {ID_WIDTH{1'b0}}; // 主输出 AW ID 寄存器。
+reg [ADDR_WIDTH-1:0]   m_axi_awaddr_reg   = {ADDR_WIDTH{1'b0}}; // 主输出 AW 地址寄存器。
+reg [7:0]              m_axi_awlen_reg    = 8'd0; // 主输出 AWLEN 寄存器。
+reg [2:0]              m_axi_awsize_reg   = 3'd0; // 主输出 AWSIZE 寄存器。
+reg [1:0]              m_axi_awburst_reg  = 2'd0; // 主输出 AWBURST 寄存器。
+reg                    m_axi_awlock_reg   = 1'b0; // 主输出 AWLOCK 寄存器。
+reg [3:0]              m_axi_awcache_reg  = 4'd0; // 主输出 AWCACHE 寄存器。
+reg [2:0]              m_axi_awprot_reg   = 3'd0; // 主输出 AWPROT 寄存器。
+reg [3:0]              m_axi_awqos_reg    = 4'd0; // 主输出 AWQOS 寄存器。
+reg [3:0]              m_axi_awregion_reg = 4'd0; // 主输出 AWREGION 寄存器。
+reg [AWUSER_WIDTH-1:0] m_axi_awuser_reg   = {AWUSER_WIDTH{1'b0}}; // 主输出 AWUSER 寄存器。
+reg                    m_axi_awvalid_reg  = 1'b0, m_axi_awvalid_next; // 主输出 AWVALID 当前状态与下一状态。
 
-reg [ID_WIDTH-1:0]     temp_m_axi_awid_reg     = {ID_WIDTH{1'b0}};
-reg [ADDR_WIDTH-1:0]   temp_m_axi_awaddr_reg   = {ADDR_WIDTH{1'b0}};
-reg [7:0]              temp_m_axi_awlen_reg    = 8'd0;
-reg [2:0]              temp_m_axi_awsize_reg   = 3'd0;
-reg [1:0]              temp_m_axi_awburst_reg  = 2'd0;
-reg                    temp_m_axi_awlock_reg   = 1'b0;
-reg [3:0]              temp_m_axi_awcache_reg  = 4'd0;
-reg [2:0]              temp_m_axi_awprot_reg   = 3'd0;
-reg [3:0]              temp_m_axi_awqos_reg    = 4'd0;
-reg [3:0]              temp_m_axi_awregion_reg = 4'd0;
-reg [AWUSER_WIDTH-1:0] temp_m_axi_awuser_reg   = {AWUSER_WIDTH{1'b0}};
-reg                    temp_m_axi_awvalid_reg  = 1'b0, temp_m_axi_awvalid_next;
+reg [ID_WIDTH-1:0]     temp_m_axi_awid_reg     = {ID_WIDTH{1'b0}}; // 输出阻塞时临时缓存 AW ID。
+reg [ADDR_WIDTH-1:0]   temp_m_axi_awaddr_reg   = {ADDR_WIDTH{1'b0}}; // 临时缓存 AW 地址。
+reg [7:0]              temp_m_axi_awlen_reg    = 8'd0; // 临时缓存 AWLEN。
+reg [2:0]              temp_m_axi_awsize_reg   = 3'd0; // 临时缓存 AWSIZE。
+reg [1:0]              temp_m_axi_awburst_reg  = 2'd0; // 临时缓存 AWBURST。
+reg                    temp_m_axi_awlock_reg   = 1'b0; // 临时缓存 AWLOCK。
+reg [3:0]              temp_m_axi_awcache_reg  = 4'd0; // 临时缓存 AWCACHE。
+reg [2:0]              temp_m_axi_awprot_reg   = 3'd0; // 临时缓存 AWPROT。
+reg [3:0]              temp_m_axi_awqos_reg    = 4'd0; // 临时缓存 AWQOS。
+reg [3:0]              temp_m_axi_awregion_reg = 4'd0; // 临时缓存 AWREGION。
+reg [AWUSER_WIDTH-1:0] temp_m_axi_awuser_reg   = {AWUSER_WIDTH{1'b0}}; // 临时缓存 AWUSER。
+reg                    temp_m_axi_awvalid_reg  = 1'b0, temp_m_axi_awvalid_next; // 临时缓存 AWVALID 当前状态与下一状态。
 
-// datapath control
-reg store_axi_aw_input_to_output;
-reg store_axi_aw_input_to_temp;
-reg store_axi_aw_temp_to_output;
+// 数据通路控制
+reg store_axi_aw_input_to_output; // 置位时把输入 AW 写入主输出寄存器。
+reg store_axi_aw_input_to_temp; // 置位时把输入 AW 写入临时寄存器。
+reg store_axi_aw_temp_to_output; // 置位时把临时 AW 回放到主输出寄存器。
 
 assign s_axi_awready  = s_axi_awready_reg;
 
@@ -180,11 +186,11 @@ assign m_axi_awregion = m_axi_awregion_reg;
 assign m_axi_awuser   = AWUSER_ENABLE ? m_axi_awuser_reg : {AWUSER_WIDTH{1'b0}};
 assign m_axi_awvalid  = m_axi_awvalid_reg;
 
-// enable ready input next cycle if output is ready or the temp reg will not be filled on the next cycle (output reg empty or no input)
-wire s_axi_awready_early = m_axi_awready | (~temp_m_axi_awvalid_reg & (~m_axi_awvalid_reg | ~s_axi_awvalid));
+// 下拍 ready 预判：输出可接收，或下拍临时寄存器不会被占用时拉高
+wire s_axi_awready_early = m_axi_awready | (~temp_m_axi_awvalid_reg & (~m_axi_awvalid_reg | ~s_axi_awvalid)); // 前瞻 ready，避免 skid 气泡。
 
 always @* begin
-    // transfer sink ready state to source
+    // 将下游就绪关系映射到上游
     m_axi_awvalid_next = m_axi_awvalid_reg;
     temp_m_axi_awvalid_next = temp_m_axi_awvalid_reg;
 
@@ -193,18 +199,18 @@ always @* begin
     store_axi_aw_temp_to_output = 1'b0;
 
     if (s_axi_awready_reg) begin
-        // input is ready
+        // 当前允许接收输入
         if (m_axi_awready | ~m_axi_awvalid_reg) begin
-            // output is ready or currently not valid, transfer data to output
+            // 输出可接收，或当前输出无效：输入直写主输出
             m_axi_awvalid_next = s_axi_awvalid;
             store_axi_aw_input_to_output = 1'b1;
         end else begin
-            // output is not ready, store input in temp
+            // 输出阻塞：输入写入临时寄存器
             temp_m_axi_awvalid_next = s_axi_awvalid;
             store_axi_aw_input_to_temp = 1'b1;
         end
     end else if (m_axi_awready) begin
-        // input is not ready, but output is ready
+        // 当前不接收新输入，但输出可接收：临时寄存器回放
         m_axi_awvalid_next = temp_m_axi_awvalid_reg;
         temp_m_axi_awvalid_next = 1'b0;
         store_axi_aw_temp_to_output = 1'b1;
@@ -222,7 +228,7 @@ always @(posedge clk) begin
         temp_m_axi_awvalid_reg <= temp_m_axi_awvalid_next;
     end
 
-    // datapath
+    // 数据通路寄存
     if (store_axi_aw_input_to_output) begin
         m_axi_awid_reg <= s_axi_awid;
         m_axi_awaddr_reg <= s_axi_awaddr;
@@ -265,26 +271,26 @@ always @(posedge clk) begin
 end
 
 end else if (AW_REG_TYPE == 1) begin
-// simple register, inserts bubble cycles
+// 简单寄存模式，会引入气泡周期
 
-// datapath registers
-reg                    s_axi_awready_reg = 1'b0;
+// 数据通路寄存器
+reg                    s_axi_awready_reg = 1'b0; // 简单缓冲模式下从侧 AWREADY 寄存器。
 
-reg [ID_WIDTH-1:0]     m_axi_awid_reg     = {ID_WIDTH{1'b0}};
-reg [ADDR_WIDTH-1:0]   m_axi_awaddr_reg   = {ADDR_WIDTH{1'b0}};
-reg [7:0]              m_axi_awlen_reg    = 8'd0;
-reg [2:0]              m_axi_awsize_reg   = 3'd0;
-reg [1:0]              m_axi_awburst_reg  = 2'd0;
-reg                    m_axi_awlock_reg   = 1'b0;
-reg [3:0]              m_axi_awcache_reg  = 4'd0;
-reg [2:0]              m_axi_awprot_reg   = 3'd0;
-reg [3:0]              m_axi_awqos_reg    = 4'd0;
-reg [3:0]              m_axi_awregion_reg = 4'd0;
-reg [AWUSER_WIDTH-1:0] m_axi_awuser_reg   = {AWUSER_WIDTH{1'b0}};
-reg                    m_axi_awvalid_reg  = 1'b0, m_axi_awvalid_next;
+reg [ID_WIDTH-1:0]     m_axi_awid_reg     = {ID_WIDTH{1'b0}}; // 缓存的 AW ID。
+reg [ADDR_WIDTH-1:0]   m_axi_awaddr_reg   = {ADDR_WIDTH{1'b0}}; // 缓存的 AW 地址。
+reg [7:0]              m_axi_awlen_reg    = 8'd0; // 缓存的 AWLEN。
+reg [2:0]              m_axi_awsize_reg   = 3'd0; // 缓存的 AWSIZE。
+reg [1:0]              m_axi_awburst_reg  = 2'd0; // 缓存的 AWBURST。
+reg                    m_axi_awlock_reg   = 1'b0; // 缓存的 AWLOCK。
+reg [3:0]              m_axi_awcache_reg  = 4'd0; // 缓存的 AWCACHE。
+reg [2:0]              m_axi_awprot_reg   = 3'd0; // 缓存的 AWPROT。
+reg [3:0]              m_axi_awqos_reg    = 4'd0; // 缓存的 AWQOS。
+reg [3:0]              m_axi_awregion_reg = 4'd0; // 缓存的 AWREGION。
+reg [AWUSER_WIDTH-1:0] m_axi_awuser_reg   = {AWUSER_WIDTH{1'b0}}; // 缓存的 AWUSER。
+reg                    m_axi_awvalid_reg  = 1'b0, m_axi_awvalid_next; // 缓存 AWVALID 当前状态与下一状态。
 
-// datapath control
-reg store_axi_aw_input_to_output;
+// 数据通路控制
+reg store_axi_aw_input_to_output; // 置位时把输入 AW 写入输出缓冲。
 
 assign s_axi_awready  = s_axi_awready_reg;
 
@@ -301,11 +307,11 @@ assign m_axi_awregion = m_axi_awregion_reg;
 assign m_axi_awuser   = AWUSER_ENABLE ? m_axi_awuser_reg : {AWUSER_WIDTH{1'b0}};
 assign m_axi_awvalid  = m_axi_awvalid_reg;
 
-// enable ready input next cycle if output buffer will be empty
-wire s_axi_awready_eawly = !m_axi_awvalid_next;
+// 下拍 ready 预判：输出缓冲为空或将为空时拉高
+wire s_axi_awready_eawly = !m_axi_awvalid_next; // 下拍 AW 输出缓冲为空时允许接收。
 
 always @* begin
-    // transfer sink ready state to source
+    // 将下游就绪关系映射到上游
     m_axi_awvalid_next = m_axi_awvalid_reg;
 
     store_axi_aw_input_to_output = 1'b0;
@@ -327,7 +333,7 @@ always @(posedge clk) begin
         m_axi_awvalid_reg <= m_axi_awvalid_next;
     end
 
-    // datapath
+    // 数据通路寄存
     if (store_axi_aw_input_to_output) begin
         m_axi_awid_reg <= s_axi_awid;
         m_axi_awaddr_reg <= s_axi_awaddr;
@@ -345,7 +351,7 @@ end
 
 end else begin
 
-    // bypass AW channel
+    // AW 通道旁路
     assign m_axi_awid = s_axi_awid;
     assign m_axi_awaddr = s_axi_awaddr;
     assign m_axi_awlen = s_axi_awlen;
@@ -362,30 +368,30 @@ end else begin
 
 end
 
-// W channel
+// W 通道
 
 if (W_REG_TYPE > 1) begin
-// skid buffer, no bubble cycles
+// skid buffer，无气泡周期
 
-// datapath registers
-reg                   s_axi_wready_reg = 1'b0;
+// 数据通路寄存器
+reg                   s_axi_wready_reg = 1'b0; // skid 模式下从侧 WREADY 寄存器。
 
-reg [DATA_WIDTH-1:0]  m_axi_wdata_reg  = {DATA_WIDTH{1'b0}};
-reg [STRB_WIDTH-1:0]  m_axi_wstrb_reg  = {STRB_WIDTH{1'b0}};
-reg                   m_axi_wlast_reg  = 1'b0;
-reg [WUSER_WIDTH-1:0] m_axi_wuser_reg  = {WUSER_WIDTH{1'b0}};
-reg                   m_axi_wvalid_reg = 1'b0, m_axi_wvalid_next;
+reg [DATA_WIDTH-1:0]  m_axi_wdata_reg  = {DATA_WIDTH{1'b0}}; // 主输出 WDATA 寄存器。
+reg [STRB_WIDTH-1:0]  m_axi_wstrb_reg  = {STRB_WIDTH{1'b0}}; // 主输出 WSTRB 寄存器。
+reg                   m_axi_wlast_reg  = 1'b0; // 主输出 WLAST 寄存器。
+reg [WUSER_WIDTH-1:0] m_axi_wuser_reg  = {WUSER_WIDTH{1'b0}}; // 主输出 WUSER 寄存器。
+reg                   m_axi_wvalid_reg = 1'b0, m_axi_wvalid_next; // 主输出 WVALID 当前状态与下一状态。
 
-reg [DATA_WIDTH-1:0]  temp_m_axi_wdata_reg  = {DATA_WIDTH{1'b0}};
-reg [STRB_WIDTH-1:0]  temp_m_axi_wstrb_reg  = {STRB_WIDTH{1'b0}};
-reg                   temp_m_axi_wlast_reg  = 1'b0;
-reg [WUSER_WIDTH-1:0] temp_m_axi_wuser_reg  = {WUSER_WIDTH{1'b0}};
-reg                   temp_m_axi_wvalid_reg = 1'b0, temp_m_axi_wvalid_next;
+reg [DATA_WIDTH-1:0]  temp_m_axi_wdata_reg  = {DATA_WIDTH{1'b0}}; // 输出阻塞时临时缓存 WDATA。
+reg [STRB_WIDTH-1:0]  temp_m_axi_wstrb_reg  = {STRB_WIDTH{1'b0}}; // 临时缓存 WSTRB。
+reg                   temp_m_axi_wlast_reg  = 1'b0; // 临时缓存 WLAST。
+reg [WUSER_WIDTH-1:0] temp_m_axi_wuser_reg  = {WUSER_WIDTH{1'b0}}; // 临时缓存 WUSER。
+reg                   temp_m_axi_wvalid_reg = 1'b0, temp_m_axi_wvalid_next; // 临时缓存 WVALID 当前状态与下一状态。
 
-// datapath control
-reg store_axi_w_input_to_output;
-reg store_axi_w_input_to_temp;
-reg store_axi_w_temp_to_output;
+// 数据通路控制
+reg store_axi_w_input_to_output; // 置位时把输入 W 写入主输出寄存器。
+reg store_axi_w_input_to_temp; // 置位时把输入 W 写入临时寄存器。
+reg store_axi_w_temp_to_output; // 置位时把临时 W 回放到主输出寄存器。
 
 assign s_axi_wready = s_axi_wready_reg;
 
@@ -395,11 +401,11 @@ assign m_axi_wlast  = m_axi_wlast_reg;
 assign m_axi_wuser  = WUSER_ENABLE ? m_axi_wuser_reg : {WUSER_WIDTH{1'b0}};
 assign m_axi_wvalid = m_axi_wvalid_reg;
 
-// enable ready input next cycle if output is ready or the temp reg will not be filled on the next cycle (output reg empty or no input)
-wire s_axi_wready_early = m_axi_wready | (~temp_m_axi_wvalid_reg & (~m_axi_wvalid_reg | ~s_axi_wvalid));
+// 下拍 ready 预判：输出可接收，或下拍临时寄存器不会被占用时拉高
+wire s_axi_wready_early = m_axi_wready | (~temp_m_axi_wvalid_reg & (~m_axi_wvalid_reg | ~s_axi_wvalid)); // 前瞻 ready，避免 skid 气泡。
 
 always @* begin
-    // transfer sink ready state to source
+    // 将下游就绪关系映射到上游
     m_axi_wvalid_next = m_axi_wvalid_reg;
     temp_m_axi_wvalid_next = temp_m_axi_wvalid_reg;
 
@@ -408,18 +414,18 @@ always @* begin
     store_axi_w_temp_to_output = 1'b0;
 
     if (s_axi_wready_reg) begin
-        // input is ready
+        // 当前允许接收输入
         if (m_axi_wready | ~m_axi_wvalid_reg) begin
-            // output is ready or currently not valid, transfer data to output
+            // 输出可接收，或当前输出无效：输入直写主输出
             m_axi_wvalid_next = s_axi_wvalid;
             store_axi_w_input_to_output = 1'b1;
         end else begin
-            // output is not ready, store input in temp
+            // 输出阻塞：输入写入临时寄存器
             temp_m_axi_wvalid_next = s_axi_wvalid;
             store_axi_w_input_to_temp = 1'b1;
         end
     end else if (m_axi_wready) begin
-        // input is not ready, but output is ready
+        // 当前不接收新输入，但输出可接收：临时寄存器回放
         m_axi_wvalid_next = temp_m_axi_wvalid_reg;
         temp_m_axi_wvalid_next = 1'b0;
         store_axi_w_temp_to_output = 1'b1;
@@ -437,7 +443,7 @@ always @(posedge clk) begin
         temp_m_axi_wvalid_reg <= temp_m_axi_wvalid_next;
     end
 
-    // datapath
+    // 数据通路寄存
     if (store_axi_w_input_to_output) begin
         m_axi_wdata_reg <= s_axi_wdata;
         m_axi_wstrb_reg <= s_axi_wstrb;
@@ -459,19 +465,19 @@ always @(posedge clk) begin
 end
 
 end else if (W_REG_TYPE == 1) begin
-// simple register, inserts bubble cycles
+// 简单寄存模式，会引入气泡周期
 
-// datapath registers
-reg                   s_axi_wready_reg = 1'b0;
+// 数据通路寄存器
+reg                   s_axi_wready_reg = 1'b0; // 简单缓冲模式下从侧 WREADY 寄存器。
 
-reg [DATA_WIDTH-1:0]  m_axi_wdata_reg  = {DATA_WIDTH{1'b0}};
-reg [STRB_WIDTH-1:0]  m_axi_wstrb_reg  = {STRB_WIDTH{1'b0}};
-reg                   m_axi_wlast_reg  = 1'b0;
-reg [WUSER_WIDTH-1:0] m_axi_wuser_reg  = {WUSER_WIDTH{1'b0}};
-reg                   m_axi_wvalid_reg = 1'b0, m_axi_wvalid_next;
+reg [DATA_WIDTH-1:0]  m_axi_wdata_reg  = {DATA_WIDTH{1'b0}}; // 缓存的 WDATA。
+reg [STRB_WIDTH-1:0]  m_axi_wstrb_reg  = {STRB_WIDTH{1'b0}}; // 缓存的 WSTRB。
+reg                   m_axi_wlast_reg  = 1'b0; // 缓存的 WLAST。
+reg [WUSER_WIDTH-1:0] m_axi_wuser_reg  = {WUSER_WIDTH{1'b0}}; // 缓存的 WUSER。
+reg                   m_axi_wvalid_reg = 1'b0, m_axi_wvalid_next; // 缓存 WVALID 当前状态与下一状态。
 
-// datapath control
-reg store_axi_w_input_to_output;
+// 数据通路控制
+reg store_axi_w_input_to_output; // 置位时把输入 W 写入输出缓冲。
 
 assign s_axi_wready = s_axi_wready_reg;
 
@@ -481,11 +487,11 @@ assign m_axi_wlast  = m_axi_wlast_reg;
 assign m_axi_wuser  = WUSER_ENABLE ? m_axi_wuser_reg : {WUSER_WIDTH{1'b0}};
 assign m_axi_wvalid = m_axi_wvalid_reg;
 
-// enable ready input next cycle if output buffer will be empty
-wire s_axi_wready_ewly = !m_axi_wvalid_next;
+// 下拍 ready 预判：输出缓冲为空或将为空时拉高
+wire s_axi_wready_ewly = !m_axi_wvalid_next; // 下拍 W 输出缓冲为空时允许接收。
 
 always @* begin
-    // transfer sink ready state to source
+    // 将下游就绪关系映射到上游
     m_axi_wvalid_next = m_axi_wvalid_reg;
 
     store_axi_w_input_to_output = 1'b0;
@@ -507,7 +513,7 @@ always @(posedge clk) begin
         m_axi_wvalid_reg <= m_axi_wvalid_next;
     end
 
-    // datapath
+    // 数据通路寄存
     if (store_axi_w_input_to_output) begin
         m_axi_wdata_reg <= s_axi_wdata;
         m_axi_wstrb_reg <= s_axi_wstrb;
@@ -518,7 +524,7 @@ end
 
 end else begin
 
-    // bypass W channel
+    // W 通道旁路
     assign m_axi_wdata = s_axi_wdata;
     assign m_axi_wstrb = s_axi_wstrb;
     assign m_axi_wlast = s_axi_wlast;
@@ -528,28 +534,28 @@ end else begin
 
 end
 
-// B channel
+// B 通道
 
 if (B_REG_TYPE > 1) begin
-// skid buffer, no bubble cycles
+// skid buffer，无气泡周期
 
-// datapath registers
-reg                   m_axi_bready_reg = 1'b0;
+// 数据通路寄存器
+reg                   m_axi_bready_reg = 1'b0; // skid 模式下主侧 BREADY 寄存器。
 
-reg [ID_WIDTH-1:0]    s_axi_bid_reg    = {ID_WIDTH{1'b0}};
-reg [1:0]             s_axi_bresp_reg  = 2'b0;
-reg [BUSER_WIDTH-1:0] s_axi_buser_reg  = {BUSER_WIDTH{1'b0}};
-reg                   s_axi_bvalid_reg = 1'b0, s_axi_bvalid_next;
+reg [ID_WIDTH-1:0]    s_axi_bid_reg    = {ID_WIDTH{1'b0}}; // 主输出 B ID 寄存器。
+reg [1:0]             s_axi_bresp_reg  = 2'b0; // 主输出 BRESP 寄存器。
+reg [BUSER_WIDTH-1:0] s_axi_buser_reg  = {BUSER_WIDTH{1'b0}}; // 主输出 BUSER 寄存器。
+reg                   s_axi_bvalid_reg = 1'b0, s_axi_bvalid_next; // 主输出 BVALID 当前状态与下一状态。
 
-reg [ID_WIDTH-1:0]    temp_s_axi_bid_reg    = {ID_WIDTH{1'b0}};
-reg [1:0]             temp_s_axi_bresp_reg  = 2'b0;
-reg [BUSER_WIDTH-1:0] temp_s_axi_buser_reg  = {BUSER_WIDTH{1'b0}};
-reg                   temp_s_axi_bvalid_reg = 1'b0, temp_s_axi_bvalid_next;
+reg [ID_WIDTH-1:0]    temp_s_axi_bid_reg    = {ID_WIDTH{1'b0}}; // 输出阻塞时临时缓存 B ID。
+reg [1:0]             temp_s_axi_bresp_reg  = 2'b0; // 临时缓存 BRESP。
+reg [BUSER_WIDTH-1:0] temp_s_axi_buser_reg  = {BUSER_WIDTH{1'b0}}; // 临时缓存 BUSER。
+reg                   temp_s_axi_bvalid_reg = 1'b0, temp_s_axi_bvalid_next; // 临时缓存 BVALID 当前状态与下一状态。
 
-// datapath control
-reg store_axi_b_input_to_output;
-reg store_axi_b_input_to_temp;
-reg store_axi_b_temp_to_output;
+// 数据通路控制
+reg store_axi_b_input_to_output; // 置位时把输入 B 写入主输出寄存器。
+reg store_axi_b_input_to_temp; // 置位时把输入 B 写入临时寄存器。
+reg store_axi_b_temp_to_output; // 置位时把临时 B 回放到主输出寄存器。
 
 assign m_axi_bready = m_axi_bready_reg;
 
@@ -558,11 +564,11 @@ assign s_axi_bresp  = s_axi_bresp_reg;
 assign s_axi_buser  = BUSER_ENABLE ? s_axi_buser_reg : {BUSER_WIDTH{1'b0}};
 assign s_axi_bvalid = s_axi_bvalid_reg;
 
-// enable ready input next cycle if output is ready or the temp reg will not be filled on the next cycle (output reg empty or no input)
-wire m_axi_bready_early = s_axi_bready | (~temp_s_axi_bvalid_reg & (~s_axi_bvalid_reg | ~m_axi_bvalid));
+// 下拍 ready 预判：输出可接收，或下拍临时寄存器不会被占用时拉高
+wire m_axi_bready_early = s_axi_bready | (~temp_s_axi_bvalid_reg & (~s_axi_bvalid_reg | ~m_axi_bvalid)); // 前瞻 ready，避免 skid 气泡。
 
 always @* begin
-    // transfer sink ready state to source
+    // 将下游就绪关系映射到上游
     s_axi_bvalid_next = s_axi_bvalid_reg;
     temp_s_axi_bvalid_next = temp_s_axi_bvalid_reg;
 
@@ -571,18 +577,18 @@ always @* begin
     store_axi_b_temp_to_output = 1'b0;
 
     if (m_axi_bready_reg) begin
-        // input is ready
+        // 当前允许接收输入
         if (s_axi_bready | ~s_axi_bvalid_reg) begin
-            // output is ready or currently not valid, transfer data to output
+            // 输出可接收，或当前输出无效：输入直写主输出
             s_axi_bvalid_next = m_axi_bvalid;
             store_axi_b_input_to_output = 1'b1;
         end else begin
-            // output is not ready, store input in temp
+            // 输出阻塞：输入写入临时寄存器
             temp_s_axi_bvalid_next = m_axi_bvalid;
             store_axi_b_input_to_temp = 1'b1;
         end
     end else if (s_axi_bready) begin
-        // input is not ready, but output is ready
+        // 当前不接收新输入，但输出可接收：临时寄存器回放
         s_axi_bvalid_next = temp_s_axi_bvalid_reg;
         temp_s_axi_bvalid_next = 1'b0;
         store_axi_b_temp_to_output = 1'b1;
@@ -600,7 +606,7 @@ always @(posedge clk) begin
         temp_s_axi_bvalid_reg <= temp_s_axi_bvalid_next;
     end
 
-    // datapath
+    // 数据通路寄存
     if (store_axi_b_input_to_output) begin
         s_axi_bid_reg   <= m_axi_bid;
         s_axi_bresp_reg <= m_axi_bresp;
@@ -619,18 +625,18 @@ always @(posedge clk) begin
 end
 
 end else if (B_REG_TYPE == 1) begin
-// simple register, inserts bubble cycles
+// 简单寄存模式，会引入气泡周期
 
-// datapath registers
-reg                   m_axi_bready_reg = 1'b0;
+// 数据通路寄存器
+reg                   m_axi_bready_reg = 1'b0; // 简单缓冲模式下主侧 BREADY 寄存器。
 
-reg [ID_WIDTH-1:0]    s_axi_bid_reg    = {ID_WIDTH{1'b0}};
-reg [1:0]             s_axi_bresp_reg  = 2'b0;
-reg [BUSER_WIDTH-1:0] s_axi_buser_reg  = {BUSER_WIDTH{1'b0}};
-reg                   s_axi_bvalid_reg = 1'b0, s_axi_bvalid_next;
+reg [ID_WIDTH-1:0]    s_axi_bid_reg    = {ID_WIDTH{1'b0}}; // 缓存的 B ID。
+reg [1:0]             s_axi_bresp_reg  = 2'b0; // 缓存的 BRESP。
+reg [BUSER_WIDTH-1:0] s_axi_buser_reg  = {BUSER_WIDTH{1'b0}}; // 缓存的 BUSER。
+reg                   s_axi_bvalid_reg = 1'b0, s_axi_bvalid_next; // 缓存 BVALID 当前状态与下一状态。
 
-// datapath control
-reg store_axi_b_input_to_output;
+// 数据通路控制
+reg store_axi_b_input_to_output; // 置位时把输入 B 写入输出缓冲。
 
 assign m_axi_bready = m_axi_bready_reg;
 
@@ -639,11 +645,11 @@ assign s_axi_bresp  = s_axi_bresp_reg;
 assign s_axi_buser  = BUSER_ENABLE ? s_axi_buser_reg : {BUSER_WIDTH{1'b0}};
 assign s_axi_bvalid = s_axi_bvalid_reg;
 
-// enable ready input next cycle if output buffer will be empty
-wire m_axi_bready_early = !s_axi_bvalid_next;
+// 下拍 ready 预判：输出缓冲为空或将为空时拉高
+wire m_axi_bready_early = !s_axi_bvalid_next; // 下拍 B 输出缓冲为空时允许接收。
 
 always @* begin
-    // transfer sink ready state to source
+    // 将下游就绪关系映射到上游
     s_axi_bvalid_next = s_axi_bvalid_reg;
 
     store_axi_b_input_to_output = 1'b0;
@@ -665,7 +671,7 @@ always @(posedge clk) begin
         s_axi_bvalid_reg <= s_axi_bvalid_next;
     end
 
-    // datapath
+    // 数据通路寄存
     if (store_axi_b_input_to_output) begin
         s_axi_bid_reg   <= m_axi_bid;
         s_axi_bresp_reg <= m_axi_bresp;
@@ -675,7 +681,7 @@ end
 
 end else begin
 
-    // bypass B channel
+    // B 通道旁路
     assign s_axi_bid = m_axi_bid;
     assign s_axi_bresp = m_axi_bresp;
     assign s_axi_buser = BUSER_ENABLE ? m_axi_buser : {BUSER_WIDTH{1'b0}};

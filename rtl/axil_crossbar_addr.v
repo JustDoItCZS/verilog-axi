@@ -22,89 +22,97 @@ THE SOFTWARE.
 
 */
 
-// Language: Verilog 2001
+// 语言: Verilog 2001
 
 `resetall
 `timescale 1ns / 1ps
 `default_nettype none
 
 /*
- * AXI4 lite crossbar address decode and admission control
+ * AXI4-Lite 交叉开关地址解码与接纳控制
+ *
+ * 模块目录
+ * 1) 接收来自单个从端口的一路地址通道流。
+ * 2) 进行地址区域比较与权限检查，选择一个目标主端口。
+ * 3) 输出：
+ *    - 即时地址授予（m_select + m_axil_avalid）
+ *    - 可选写命令记账通道（m_wc_*）
+ *    - 回程路由用响应命令记账通道（m_rc_*）
  */
 module axil_crossbar_addr #
 (
-    // Slave interface index
+    // 从接口索引
     parameter S = 0,
-    // Number of AXI inputs (slave interfaces)
+    // AXI 输入端口数量（从接口数量）
     parameter S_COUNT = 4,
-    // Number of AXI outputs (master interfaces)
+    // AXI 输出端口数量（主接口数量）
     parameter M_COUNT = 4,
-    // Width of address bus in bits
+    // 地址总线位宽
     parameter ADDR_WIDTH = 32,
-    // Number of regions per master interface
+    // 每个主接口的地址区域数量
     parameter M_REGIONS = 1,
-    // Master interface base addresses
-    // M_COUNT concatenated fields of M_REGIONS concatenated fields of ADDR_WIDTH bits
-    // set to zero for default addressing based on M_ADDR_WIDTH
+    // 主接口基地址表
+    // 格式：M_COUNT 组，每组含 M_REGIONS 个 ADDR_WIDTH 位字段
+    // 置 0 时按 M_ADDR_WIDTH 自动生成默认地址映射
     parameter M_BASE_ADDR = 0,
-    // Master interface address widths
-    // M_COUNT concatenated fields of M_REGIONS concatenated fields of 32 bits
+    // 主接口地址宽度表
+    // 格式：M_COUNT 组，每组含 M_REGIONS 个 32 位字段
     parameter M_ADDR_WIDTH = {M_COUNT{{M_REGIONS{32'd24}}}},
-    // Connections between interfaces
-    // M_COUNT concatenated fields of S_COUNT bits
+    // 接口间连通矩阵
+    // 格式：M_COUNT 组，每组 S_COUNT 位
     parameter M_CONNECT = {M_COUNT{{S_COUNT{1'b1}}}},
-    // Secure master (fail operations based on awprot/arprot)
-    // M_COUNT bits
+    // 安全主端口配置（基于 awprot/arprot 拒绝访问）
+    // M_COUNT 位
     parameter M_SECURE = {M_COUNT{1'b0}},
-    // Enable write command output
+    // 使能写命令输出通道
     parameter WC_OUTPUT = 0
 )
 (
-    input  wire                       clk,
-    input  wire                       rst,
+    input  wire                       clk, // 解码与控制时钟。
+    input  wire                       rst, // 同步复位，清空状态与有效标志。
 
     /*
-     * Address input
+     * 地址输入
      */
-    input  wire [ADDR_WIDTH-1:0]      s_axil_aaddr,
-    input  wire [2:0]                 s_axil_aprot,
-    input  wire                       s_axil_avalid,
-    output wire                       s_axil_aready,
+    input  wire [ADDR_WIDTH-1:0]      s_axil_aaddr, // 输入地址，与所有配置区域进行匹配解码。
+    input  wire [2:0]                 s_axil_aprot, // 输入保护位；bit[1] 参与安全过滤。
+    input  wire                       s_axil_avalid, // 上游地址通道输入有效。
+    output wire                       s_axil_aready, // 返回上游就绪；解码器可接收新请求时拉高。
 
     /*
-     * Address output
+     * 地址输出
      */
-    output wire [$clog2(M_COUNT)-1:0] m_select,
-    output wire                       m_axil_avalid,
-    input  wire                       m_axil_aready,
+    output wire [$clog2(M_COUNT)-1:0] m_select, // 当前请求解码得到的目标主端索引。
+    output wire                       m_axil_avalid, // 解码目标有效；保持到下游接收完成。
+    input  wire                       m_axil_aready, // 下游地址通路返回握手就绪。
 
     /*
-     * Write command output
+     * 写命令输出
      */
-    output wire [$clog2(M_COUNT)-1:0] m_wc_select,
-    output wire                       m_wc_decerr,
-    output wire                       m_wc_valid,
-    input  wire                       m_wc_ready,
+    output wire [$clog2(M_COUNT)-1:0] m_wc_select, // 写数据路径记账使用的目标索引。
+    output wire                       m_wc_decerr, // 与 m_wc_select 配对的解码错误标记。
+    output wire                       m_wc_valid, // 写命令记账有效；仅 WC_OUTPUT 使能时有效。
+    input  wire                       m_wc_ready, // 写命令记账通道反压输入。
 
     /*
-     * Reply command output
+     * 响应命令输出
      */
-    output wire [$clog2(M_COUNT)-1:0] m_rc_select,
-    output wire                       m_rc_decerr,
-    output wire                       m_rc_valid,
-    input  wire                       m_rc_ready
+    output wire [$clog2(M_COUNT)-1:0] m_rc_select, // 写入响应路由 FIFO 的目标索引。
+    output wire                       m_rc_decerr, // 回程路径合成 DECERR 用的解码错误标记。
+    output wire                       m_rc_valid, // 响应命令有效；每次地址解码接纳后置位。
+    input  wire                       m_rc_ready // 响应命令消费者/FIFO 写端返回反压。
 );
 
-parameter CL_S_COUNT = $clog2(S_COUNT);
-parameter CL_M_COUNT = $clog2(M_COUNT);
+parameter CL_S_COUNT = $clog2(S_COUNT); // 编码源从端索引位宽（用于连通掩码）。
+parameter CL_M_COUNT = $clog2(M_COUNT); // 编码解码后主端选择位宽。
 
-// default address computation
+// 默认地址映射计算
 function [M_COUNT*M_REGIONS*ADDR_WIDTH-1:0] calcBaseAddrs(input [31:0] dummy);
-    integer i;
-    reg [ADDR_WIDTH-1:0] base;
-    reg [ADDR_WIDTH-1:0] width;
-    reg [ADDR_WIDTH-1:0] size;
-    reg [ADDR_WIDTH-1:0] mask;
+    integer i; // 默认基地址生成的区域循环变量。
+    reg [ADDR_WIDTH-1:0] base; // 综合地址映射时逐步推进的基地址指针。
+    reg [ADDR_WIDTH-1:0] width; // 当前区域大小指数（地址宽度配置项）。
+    reg [ADDR_WIDTH-1:0] size; // 当前宽度对应的区域字节大小。
+    reg [ADDR_WIDTH-1:0] mask; // 由宽度推导的对齐掩码，用于对齐与范围计算。
     begin
         calcBaseAddrs = {M_COUNT*M_REGIONS*ADDR_WIDTH{1'b0}};
         base = 0;
@@ -114,20 +122,20 @@ function [M_COUNT*M_REGIONS*ADDR_WIDTH-1:0] calcBaseAddrs(input [31:0] dummy);
             size = mask + 1;
             if (width > 0) begin
                 if ((base & mask) != 0) begin
-                   base = base + size - (base & mask); // align
+                   base = base + size - (base & mask); // 对齐到该区域边界
                 end
                 calcBaseAddrs[i * ADDR_WIDTH +: ADDR_WIDTH] = base;
-                base = base + size; // increment
+                base = base + size; // 推进到下一段基地址
             end
         end
     end
 endfunction
 
-parameter M_BASE_ADDR_INT = M_BASE_ADDR ? M_BASE_ADDR : calcBaseAddrs(0);
+parameter M_BASE_ADDR_INT = M_BASE_ADDR ? M_BASE_ADDR : calcBaseAddrs(0); // 可选自动生成后的有效区域基地址表。
 
-integer i, j;
+integer i, j; // 配置校验与解码比较循环变量。
 
-// check configuration
+// 配置合法性检查
 initial begin
     if (M_REGIONS < 1) begin
         $error("Error: need at least 1 region (instance %m)");
@@ -198,18 +206,18 @@ initial begin
 end
 
 localparam [2:0]
-    STATE_IDLE = 3'd0,
-    STATE_DECODE = 3'd1;
+    STATE_IDLE = 3'd0, // 空闲态：等待新的 s_axil_avalid 事务。
+    STATE_DECODE = 3'd1; // 解码态：保持解码元数据有效直至输出握手完成。
 
-reg [2:0] state_reg = STATE_IDLE, state_next;
+reg [2:0] state_reg = STATE_IDLE, state_next; // 解码控制 FSM 当前/下一状态。
 
-reg s_axil_aready_reg = 0, s_axil_aready_next;
+reg s_axil_aready_reg = 0, s_axil_aready_next; // 输入 ready 寄存器；当前事务排空后重新拉高。
 
-reg [CL_M_COUNT-1:0] m_select_reg = 0, m_select_next;
-reg m_axil_avalid_reg = 1'b0, m_axil_avalid_next;
-reg m_decerr_reg = 1'b0, m_decerr_next;
-reg m_wc_valid_reg = 1'b0, m_wc_valid_next;
-reg m_rc_valid_reg = 1'b0, m_rc_valid_next;
+reg [CL_M_COUNT-1:0] m_select_reg = 0, m_select_next; // 锁存的主端口选择索引。
+reg m_axil_avalid_reg = 1'b0, m_axil_avalid_next; // 地址输出有效标志；m_axil_aready 握手后清零。
+reg m_decerr_reg = 1'b0, m_decerr_next; // 与当前事务元数据配对锁存的解码错误标志。
+reg m_wc_valid_reg = 1'b0, m_wc_valid_next; // 写命令元数据有效；随 m_wc_ready 握手变化。
+reg m_rc_valid_reg = 1'b0, m_rc_valid_next; // 响应命令元数据有效；随 m_rc_ready 握手变化。
 
 assign s_axil_aready = s_axil_aready_reg;
 
@@ -224,7 +232,7 @@ assign m_rc_select = m_select_reg;
 assign m_rc_decerr = m_decerr_reg;
 assign m_rc_valid = m_rc_valid_reg;
 
-reg match;
+reg match; // 组合解码命中标志；任一区域比较成功时置位。
 
 always @* begin
     state_next = STATE_IDLE;
@@ -241,7 +249,7 @@ always @* begin
 
     case (state_reg)
         STATE_IDLE: begin
-            // idle state, store values
+            // 空闲态：锁存输入信息
             s_axil_aready_next = 1'b0;
 
             if (s_axil_avalid && !s_axil_aready) begin
@@ -256,14 +264,14 @@ always @* begin
                 end
 
                 if (match) begin
-                    // address decode successful
+                    // 地址解码成功
                     m_axil_avalid_next = 1'b1;
                     m_decerr_next = 1'b0;
                     m_wc_valid_next = WC_OUTPUT;
                     m_rc_valid_next = 1'b1;
                     state_next = STATE_DECODE;
                 end else begin
-                    // decode error
+                    // 地址解码失败
                     m_axil_avalid_next = 1'b0;
                     m_decerr_next = 1'b1;
                     m_wc_valid_next = WC_OUTPUT;

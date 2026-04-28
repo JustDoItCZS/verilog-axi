@@ -22,99 +22,104 @@ THE SOFTWARE.
 
 */
 
-// Language: Verilog 2001
+// 语言: Verilog 2001
 
 `resetall
 `timescale 1ns / 1ps
 `default_nettype none
 
 /*
- * AXI4 to AXI4-Lite adapter
+ * AXI4 到 AXI4-Lite 适配器
+ *
+ * 模块目录
+ * 1) 封装并实例化 AXI->AXI-Lite 写适配器（`axi_axil_adapter_wr`）。
+ * 2) 封装并实例化 AXI->AXI-Lite 读适配器（`axi_axil_adapter_rd`）。
+ * 3) 将支持突发的 AXI 事务转换为 AXI-Lite 单拍事务。
  */
 module axi_axil_adapter #
 (
-    // Width of address bus in bits
+    // 地址总线位宽
     parameter ADDR_WIDTH = 32,
-    // Width of input (slave) AXI interface data bus in bits
+    // 输入侧（从接口）AXI 数据总线位宽
     parameter AXI_DATA_WIDTH = 32,
-    // Width of input (slave) AXI interface wstrb (width of data bus in words)
+    // 输入侧（从接口）AXI WSTRB 位宽（按字节 lane）
     parameter AXI_STRB_WIDTH = (AXI_DATA_WIDTH/8),
-    // Width of AXI ID signal
+    // AXI ID 信号位宽
     parameter AXI_ID_WIDTH = 8,
-    // Width of output (master) AXI lite interface data bus in bits
+    // 输出侧（主接口）AXI-Lite 数据总线位宽
     parameter AXIL_DATA_WIDTH = 32,
-    // Width of output (master) AXI lite interface wstrb (width of data bus in words)
+    // 输出侧（主接口）AXI-Lite WSTRB 位宽（按字节 lane）
     parameter AXIL_STRB_WIDTH = (AXIL_DATA_WIDTH/8),
-    // When adapting to a wider bus, re-pack full-width burst instead of passing through narrow burst if possible
+    // 向更宽总线适配时，尽可能重打包为满宽突发，而不是透传窄突发
     parameter CONVERT_BURST = 1,
-    // When adapting to a wider bus, re-pack all bursts instead of passing through narrow burst if possible
+    // 向更宽总线适配时，对所有突发执行重打包，而不是透传窄突发
     parameter CONVERT_NARROW_BURST = 0
 )
 (
-    input  wire                        clk,
-    input  wire                        rst,
+    input  wire                        clk, // 读写 AXI->AXI-Lite 适配路径共用时钟。
+    input  wire                        rst, // 两条适配路径共用同步复位。
 
     /*
-     * AXI slave interface
+     * AXI 从接口
      */
-    input  wire [AXI_ID_WIDTH-1:0]     s_axi_awid,
-    input  wire [ADDR_WIDTH-1:0]       s_axi_awaddr,
-    input  wire [7:0]                  s_axi_awlen,
-    input  wire [2:0]                  s_axi_awsize,
-    input  wire [1:0]                  s_axi_awburst,
-    input  wire                        s_axi_awlock,
-    input  wire [3:0]                  s_axi_awcache,
-    input  wire [2:0]                  s_axi_awprot,
-    input  wire                        s_axi_awvalid,
-    output wire                        s_axi_awready,
-    input  wire [AXI_DATA_WIDTH-1:0]   s_axi_wdata,
-    input  wire [AXI_STRB_WIDTH-1:0]   s_axi_wstrb,
-    input  wire                        s_axi_wlast,
-    input  wire                        s_axi_wvalid,
-    output wire                        s_axi_wready,
-    output wire [AXI_ID_WIDTH-1:0]     s_axi_bid,
-    output wire [1:0]                  s_axi_bresp,
-    output wire                        s_axi_bvalid,
-    input  wire                        s_axi_bready,
-    input  wire [AXI_ID_WIDTH-1:0]     s_axi_arid,
-    input  wire [ADDR_WIDTH-1:0]       s_axi_araddr,
-    input  wire [7:0]                  s_axi_arlen,
-    input  wire [2:0]                  s_axi_arsize,
-    input  wire [1:0]                  s_axi_arburst,
-    input  wire                        s_axi_arlock,
-    input  wire [3:0]                  s_axi_arcache,
-    input  wire [2:0]                  s_axi_arprot,
-    input  wire                        s_axi_arvalid,
-    output wire                        s_axi_arready,
-    output wire [AXI_ID_WIDTH-1:0]     s_axi_rid,
-    output wire [AXI_DATA_WIDTH-1:0]   s_axi_rdata,
-    output wire [1:0]                  s_axi_rresp,
-    output wire                        s_axi_rlast,
-    output wire                        s_axi_rvalid,
-    input  wire                        s_axi_rready,
+    input  wire [AXI_ID_WIDTH-1:0]     s_axi_awid, // AXI 从端 AW ID。
+    input  wire [ADDR_WIDTH-1:0]       s_axi_awaddr, // AXI 从端 AW 地址。
+    input  wire [7:0]                  s_axi_awlen, // AXI 从端 AW 突发长度。
+    input  wire [2:0]                  s_axi_awsize, // AXI 从端 AW 突发尺寸。
+    input  wire [1:0]                  s_axi_awburst, // AXI 从端 AW 突发类型。
+    input  wire                        s_axi_awlock, // AXI 从端 AW 锁属性。
+    input  wire [3:0]                  s_axi_awcache, // AXI 从端 AW cache 属性。
+    input  wire [2:0]                  s_axi_awprot, // AXI 从端 AW 保护属性。
+    input  wire                        s_axi_awvalid, // AXI 从端 AWVALID。
+    output wire                        s_axi_awready, // AXI 从端 AWREADY。
+    input  wire [AXI_DATA_WIDTH-1:0]   s_axi_wdata, // AXI 从端 W 数据。
+    input  wire [AXI_STRB_WIDTH-1:0]   s_axi_wstrb, // AXI 从端 W 字节使能。
+    input  wire                        s_axi_wlast, // AXI 从端 WLAST。
+    input  wire                        s_axi_wvalid, // AXI 从端 WVALID。
+    output wire                        s_axi_wready, // AXI 从端 WREADY。
+    output wire [AXI_ID_WIDTH-1:0]     s_axi_bid, // AXI 从端 B ID。
+    output wire [1:0]                  s_axi_bresp, // AXI 从端 B 响应码。
+    output wire                        s_axi_bvalid, // AXI 从端 BVALID。
+    input  wire                        s_axi_bready, // AXI 从端 BREADY。
+    input  wire [AXI_ID_WIDTH-1:0]     s_axi_arid, // AXI 从端 AR ID。
+    input  wire [ADDR_WIDTH-1:0]       s_axi_araddr, // AXI 从端 AR 地址。
+    input  wire [7:0]                  s_axi_arlen, // AXI 从端 AR 突发长度。
+    input  wire [2:0]                  s_axi_arsize, // AXI 从端 AR 突发尺寸。
+    input  wire [1:0]                  s_axi_arburst, // AXI 从端 AR 突发类型。
+    input  wire                        s_axi_arlock, // AXI 从端 AR 锁属性。
+    input  wire [3:0]                  s_axi_arcache, // AXI 从端 AR cache 属性。
+    input  wire [2:0]                  s_axi_arprot, // AXI 从端 AR 保护属性。
+    input  wire                        s_axi_arvalid, // AXI 从端 ARVALID。
+    output wire                        s_axi_arready, // AXI 从端 ARREADY。
+    output wire [AXI_ID_WIDTH-1:0]     s_axi_rid, // AXI 从端 R ID。
+    output wire [AXI_DATA_WIDTH-1:0]   s_axi_rdata, // AXI 从端 R 数据。
+    output wire [1:0]                  s_axi_rresp, // AXI 从端 R 响应码。
+    output wire                        s_axi_rlast, // AXI 从端 RLAST。
+    output wire                        s_axi_rvalid, // AXI 从端 RVALID。
+    input  wire                        s_axi_rready, // AXI 从端 RREADY。
 
     /*
-     * AXI lite master interface
+     * AXI-Lite 主接口
      */
-    output wire [ADDR_WIDTH-1:0]       m_axil_awaddr,
-    output wire [2:0]                  m_axil_awprot,
-    output wire                        m_axil_awvalid,
-    input  wire                        m_axil_awready,
-    output wire [AXIL_DATA_WIDTH-1:0]  m_axil_wdata,
-    output wire [AXIL_STRB_WIDTH-1:0]  m_axil_wstrb,
-    output wire                        m_axil_wvalid,
-    input  wire                        m_axil_wready,
-    input  wire [1:0]                  m_axil_bresp,
-    input  wire                        m_axil_bvalid,
-    output wire                        m_axil_bready,
-    output wire [ADDR_WIDTH-1:0]       m_axil_araddr,
-    output wire [2:0]                  m_axil_arprot,
-    output wire                        m_axil_arvalid,
-    input  wire                        m_axil_arready,
-    input  wire [AXIL_DATA_WIDTH-1:0]  m_axil_rdata,
-    input  wire [1:0]                  m_axil_rresp,
-    input  wire                        m_axil_rvalid,
-    output wire                        m_axil_rready
+    output wire [ADDR_WIDTH-1:0]       m_axil_awaddr, // AXI-Lite 主端 AW 地址。
+    output wire [2:0]                  m_axil_awprot, // AXI-Lite 主端 AW 保护属性。
+    output wire                        m_axil_awvalid, // AXI-Lite 主端 AWVALID。
+    input  wire                        m_axil_awready, // AXI-Lite 主端 AWREADY。
+    output wire [AXIL_DATA_WIDTH-1:0]  m_axil_wdata, // AXI-Lite 主端 W 数据。
+    output wire [AXIL_STRB_WIDTH-1:0]  m_axil_wstrb, // AXI-Lite 主端 W 字节使能。
+    output wire                        m_axil_wvalid, // AXI-Lite 主端 WVALID。
+    input  wire                        m_axil_wready, // AXI-Lite 主端 WREADY。
+    input  wire [1:0]                  m_axil_bresp, // AXI-Lite 主端 B 响应码。
+    input  wire                        m_axil_bvalid, // AXI-Lite 主端 BVALID。
+    output wire                        m_axil_bready, // AXI-Lite 主端 BREADY。
+    output wire [ADDR_WIDTH-1:0]       m_axil_araddr, // AXI-Lite 主端 AR 地址。
+    output wire [2:0]                  m_axil_arprot, // AXI-Lite 主端 AR 保护属性。
+    output wire                        m_axil_arvalid, // AXI-Lite 主端 ARVALID。
+    input  wire                        m_axil_arready, // AXI-Lite 主端 ARREADY。
+    input  wire [AXIL_DATA_WIDTH-1:0]  m_axil_rdata, // AXI-Lite 主端 R 数据。
+    input  wire [1:0]                  m_axil_rresp, // AXI-Lite 主端 R 响应码。
+    input  wire                        m_axil_rvalid, // AXI-Lite 主端 RVALID。
+    output wire                        m_axil_rready // AXI-Lite 主端 RREADY。
 );
 
 
@@ -133,7 +138,7 @@ axi_axil_adapter_wr_inst (
     .rst(rst),
 
     /*
-     * AXI slave interface
+     * AXI 从接口
      */
     .s_axi_awid(s_axi_awid),
     .s_axi_awaddr(s_axi_awaddr),
@@ -156,7 +161,7 @@ axi_axil_adapter_wr_inst (
     .s_axi_bready(s_axi_bready),
 
     /*
-     * AXI lite master interface
+     * AXI-Lite 主接口
      */
     .m_axil_awaddr(m_axil_awaddr),
     .m_axil_awprot(m_axil_awprot),
@@ -186,7 +191,7 @@ axi_axil_adapter_rd_inst (
     .rst(rst),
 
     /*
-     * AXI slave interface
+     * AXI 从接口
      */
     .s_axi_arid(s_axi_arid),
     .s_axi_araddr(s_axi_araddr),
@@ -206,7 +211,7 @@ axi_axil_adapter_rd_inst (
     .s_axi_rready(s_axi_rready),
 
     /*
-     * AXI lite master interface
+     * AXI-Lite 主接口
      */
     .m_axil_araddr(m_axil_araddr),
     .m_axil_arprot(m_axil_arprot),

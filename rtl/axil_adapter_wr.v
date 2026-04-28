@@ -22,61 +22,67 @@ THE SOFTWARE.
 
 */
 
-// Language: Verilog 2001
+// 语言: Verilog 2001
 
 `resetall
 `timescale 1ns / 1ps
 `default_nettype none
 
 /*
- * AXI4 lite width adapter (write)
+ * AXI4-Lite 位宽适配器（写通道）
+ *
+ * 模块目录
+ * 1) 接收从侧 AXI-Lite 写地址/写数据/写响应通道。
+ * 2) 在主从位宽不一致时重组写数据与写字节使能。
+ * 3) 主侧位宽较窄时：一次从侧写拆分为多次主侧写并合并响应。
+ * 4) 主侧位宽相同或更宽时：按单次事务路径直接转发。
  */
 module axil_adapter_wr #
 (
-    // Width of address bus in bits
+    // 地址总线位宽
     parameter ADDR_WIDTH = 32,
-    // Width of input (slave) interface data bus in bits
+    // 输入（从侧）接口数据位宽
     parameter S_DATA_WIDTH = 32,
-    // Width of input (slave) interface wstrb (width of data bus in words)
+    // 输入（从侧）接口 WSTRB 位宽（按字节）
     parameter S_STRB_WIDTH = (S_DATA_WIDTH/8),
-    // Width of output (master) interface data bus in bits
+    // 输出（主侧）接口数据位宽
     parameter M_DATA_WIDTH = 32,
-    // Width of output (master) interface wstrb (width of data bus in words)
+    // 输出（主侧）接口 WSTRB 位宽（按字节）
     parameter M_STRB_WIDTH = (M_DATA_WIDTH/8)
 )
 (
-    input  wire                     clk,
-    input  wire                     rst,
+    input  wire                     clk,            // 适配状态机与写通道寄存器时钟。
+    input  wire                     rst,            // 适配器状态同步复位。
 
     /*
-     * AXI lite slave interface
+     * AXI-Lite 从接口
      */
-    input  wire [ADDR_WIDTH-1:0]    s_axil_awaddr,
-    input  wire [2:0]               s_axil_awprot,
-    input  wire                     s_axil_awvalid,
-    output wire                     s_axil_awready,
-    input  wire [S_DATA_WIDTH-1:0]  s_axil_wdata,
-    input  wire [S_STRB_WIDTH-1:0]  s_axil_wstrb,
-    input  wire                     s_axil_wvalid,
-    output wire                     s_axil_wready,
-    output wire [1:0]               s_axil_bresp,
-    output wire                     s_axil_bvalid,
-    input  wire                     s_axil_bready,
+    input  wire [ADDR_WIDTH-1:0]    s_axil_awaddr,  // 从侧 AW 地址（位宽转换前）。
+    input  wire [2:0]               s_axil_awprot,  // 从侧 AW 保护属性。
+    input  wire                     s_axil_awvalid, // 从侧 AW 有效。
+    output wire                     s_axil_awready, // 从侧 AW 就绪（由适配器状态机生成）。
+    input  wire [S_DATA_WIDTH-1:0]  s_axil_wdata,   // 从侧 W 数据（从侧位宽）。
+    input  wire [S_STRB_WIDTH-1:0]  s_axil_wstrb,   // 从侧 W 字节使能（从侧位宽）。
+    input  wire                     s_axil_wvalid,  // 从侧 W 有效。
+    output wire                     s_axil_wready,  // 从侧 W 就绪（由适配器状态机生成）。
+    output wire [1:0]               s_axil_bresp,   // 从侧 B 响应（合并后）。
+    output wire                     s_axil_bvalid,  // 从侧 B 有效。
+    input  wire                     s_axil_bready,  // 从侧 B 就绪。
 
     /*
-     * AXI lite master interface
+     * AXI-Lite 主接口
      */
-    output wire [ADDR_WIDTH-1:0]    m_axil_awaddr,
-    output wire [2:0]               m_axil_awprot,
-    output wire                     m_axil_awvalid,
-    input  wire                     m_axil_awready,
-    output wire [M_DATA_WIDTH-1:0]  m_axil_wdata,
-    output wire [M_STRB_WIDTH-1:0]  m_axil_wstrb,
-    output wire                     m_axil_wvalid,
-    input  wire                     m_axil_wready,
-    input  wire [1:0]               m_axil_bresp,
-    input  wire                     m_axil_bvalid,
-    output wire                     m_axil_bready
+    output wire [ADDR_WIDTH-1:0]    m_axil_awaddr,  // 主侧 AW 地址（适配/分段后）。
+    output wire [2:0]               m_axil_awprot,  // 主侧 AW 保护属性。
+    output wire                     m_axil_awvalid, // 主侧 AW 有效。
+    input  wire                     m_axil_awready, // 主侧 AW 就绪（来自下游目标）。
+    output wire [M_DATA_WIDTH-1:0]  m_axil_wdata,   // 主侧 W 数据（主侧位宽）。
+    output wire [M_STRB_WIDTH-1:0]  m_axil_wstrb,   // 主侧 W 字节使能（主侧位宽）。
+    output wire                     m_axil_wvalid,  // 主侧 W 有效。
+    input  wire                     m_axil_wready,  // 主侧 W 就绪（来自下游目标）。
+    input  wire [1:0]               m_axil_bresp,   // 主侧 B 响应（来自下游目标）。
+    input  wire                     m_axil_bvalid,  // 主侧 B 有效（来自下游目标）。
+    output wire                     m_axil_bready   // 主侧 B 就绪（由适配器状态机驱动）。
 );
 
 parameter S_ADDR_BIT_OFFSET = $clog2(S_STRB_WIDTH);
@@ -88,18 +94,18 @@ parameter M_WORD_SIZE = M_DATA_WIDTH/M_WORD_WIDTH;
 parameter S_ADDR_MASK = {ADDR_WIDTH{1'b1}} << S_ADDR_BIT_OFFSET;
 parameter M_ADDR_MASK = {ADDR_WIDTH{1'b1}} << M_ADDR_BIT_OFFSET;
 
-// output bus is wider
+// 主侧数据总线更宽
 parameter EXPAND = M_STRB_WIDTH > S_STRB_WIDTH;
 parameter DATA_WIDTH = EXPAND ? M_DATA_WIDTH : S_DATA_WIDTH;
 parameter STRB_WIDTH = EXPAND ? M_STRB_WIDTH : S_STRB_WIDTH;
-// required number of segments in wider bus
+// 宽总线下所需分段数
 parameter SEGMENT_COUNT = EXPAND ? (M_STRB_WIDTH / S_STRB_WIDTH) : (S_STRB_WIDTH / M_STRB_WIDTH);
 parameter SEGMENT_COUNT_WIDTH = SEGMENT_COUNT == 1 ? 1 : $clog2(SEGMENT_COUNT);
-// data width and keep width per segment
+// 每段数据位宽与字节使能位宽
 parameter SEGMENT_DATA_WIDTH = DATA_WIDTH / SEGMENT_COUNT;
 parameter SEGMENT_STRB_WIDTH = STRB_WIDTH / SEGMENT_COUNT;
 
-// bus width assertions
+// 总线位宽约束检查
 initial begin
     if (S_WORD_SIZE * S_STRB_WIDTH != S_DATA_WIDTH) begin
         $error("Error: AXI slave interface data width not evenly divisble (instance %m)");
@@ -132,25 +138,25 @@ localparam [1:0]
     STATE_DATA = 2'd1,
     STATE_RESP = 2'd3;
 
-reg [1:0] state_reg = STATE_IDLE, state_next;
+reg [1:0] state_reg = STATE_IDLE, state_next; // 写适配状态机当前状态与下一状态。
 
-reg [DATA_WIDTH-1:0] data_reg = {DATA_WIDTH{1'b0}}, data_next;
-reg [STRB_WIDTH-1:0] strb_reg = {STRB_WIDTH{1'b0}}, strb_next;
+reg [DATA_WIDTH-1:0] data_reg = {DATA_WIDTH{1'b0}}, data_next; // 主侧位宽较窄时缓存从侧写数据，用于分段发送。
+reg [STRB_WIDTH-1:0] strb_reg = {STRB_WIDTH{1'b0}}, strb_next; // 与 data_reg 配套的缓存字节使能。
 
-reg [SEGMENT_COUNT_WIDTH-1:0] current_segment_reg = 0, current_segment_next;
+reg [SEGMENT_COUNT_WIDTH-1:0] current_segment_reg = 0, current_segment_next; // 主侧位宽较窄拆分写事务时的当前分段索引。
 
-reg s_axil_awready_reg = 1'b0, s_axil_awready_next;
-reg s_axil_wready_reg = 1'b0, s_axil_wready_next;
-reg [1:0] s_axil_bresp_reg = 2'd0, s_axil_bresp_next;
-reg s_axil_bvalid_reg = 1'b0, s_axil_bvalid_next;
+reg s_axil_awready_reg = 1'b0, s_axil_awready_next; // 从侧 AW 就绪当前状态与下一状态。
+reg s_axil_wready_reg = 1'b0, s_axil_wready_next; // 从侧 W 就绪当前状态与下一状态。
+reg [1:0] s_axil_bresp_reg = 2'd0, s_axil_bresp_next; // 从侧 B 响应寄存器当前值与下一值。
+reg s_axil_bvalid_reg = 1'b0, s_axil_bvalid_next; // 从侧 B 有效当前状态与下一状态。
 
-reg [ADDR_WIDTH-1:0] m_axil_awaddr_reg = {ADDR_WIDTH{1'b0}}, m_axil_awaddr_next;
-reg [2:0] m_axil_awprot_reg = 3'd0, m_axil_awprot_next;
-reg m_axil_awvalid_reg = 1'b0, m_axil_awvalid_next;
-reg [M_DATA_WIDTH-1:0] m_axil_wdata_reg = {M_DATA_WIDTH{1'b0}}, m_axil_wdata_next;
-reg [M_STRB_WIDTH-1:0] m_axil_wstrb_reg = {M_STRB_WIDTH{1'b0}}, m_axil_wstrb_next;
-reg m_axil_wvalid_reg = 1'b0, m_axil_wvalid_next;
-reg m_axil_bready_reg = 1'b0, m_axil_bready_next;
+reg [ADDR_WIDTH-1:0] m_axil_awaddr_reg = {ADDR_WIDTH{1'b0}}, m_axil_awaddr_next; // 主侧 AW 地址寄存器当前值与下一值。
+reg [2:0] m_axil_awprot_reg = 3'd0, m_axil_awprot_next; // 主侧 AW 保护属性寄存器当前值与下一值。
+reg m_axil_awvalid_reg = 1'b0, m_axil_awvalid_next; // 主侧 AW 有效当前状态与下一状态。
+reg [M_DATA_WIDTH-1:0] m_axil_wdata_reg = {M_DATA_WIDTH{1'b0}}, m_axil_wdata_next; // 主侧 W 数据寄存器当前值与下一值。
+reg [M_STRB_WIDTH-1:0] m_axil_wstrb_reg = {M_STRB_WIDTH{1'b0}}, m_axil_wstrb_next; // 主侧 W 字节使能寄存器当前值与下一值。
+reg m_axil_wvalid_reg = 1'b0, m_axil_wvalid_next; // 主侧 W 有效当前状态与下一状态。
+reg m_axil_bready_reg = 1'b0, m_axil_bready_next; // 主侧 B 就绪当前状态与下一状态。
 
 assign s_axil_awready = s_axil_awready_reg;
 assign s_axil_wready = s_axil_wready_reg;
@@ -186,7 +192,7 @@ always @* begin
     m_axil_bready_next = 1'b0;
 
     if (SEGMENT_COUNT == 1 || EXPAND) begin
-        // master output is same width or wider; single cycle direct transfer
+        // 主侧位宽相同或更宽：单次直接传输
         case (state_reg)
             STATE_IDLE: begin
                 s_axil_awready_next = !m_axil_awvalid;
@@ -236,7 +242,7 @@ always @* begin
             end
         endcase
     end else begin
-        // master output is narrower; may need several cycles
+        // 主侧位宽更窄：可能需要多拍拆分
         case (state_reg)
             STATE_IDLE: begin
                 s_axil_awready_next = !m_axil_awvalid;

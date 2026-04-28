@@ -22,74 +22,80 @@ THE SOFTWARE.
 
 */
 
-// Language: Verilog 2001
+// 语言: Verilog 2001
 
 `resetall
 `timescale 1ns / 1ps
 `default_nettype none
 
 /*
- * AXI4 lite clock domain crossing module
+ * AXI4-Lite 跨时钟域模块
+ *
+ * 模块目录
+ * 1) 源时钟域（s_clk）承载从侧 AXI-Lite 接口。
+ * 2) 目标时钟域（m_clk）承载主侧 AXI-Lite 接口。
+ * 3) 写通道跨域逻辑由 axil_cdc_wr 实现。
+ * 4) 读通道跨域逻辑由 axil_cdc_rd 实现。
  */
 module axil_cdc #
 (
-    // Width of data bus in bits
+    // 数据总线位宽
     parameter DATA_WIDTH = 32,
-    // Width of address bus in bits
+    // 地址总线位宽
     parameter ADDR_WIDTH = 32,
-    // Width of wstrb (width of data bus in words)
+    // WSTRB 位宽（按字节）
     parameter STRB_WIDTH = (DATA_WIDTH/8)
 )
 (
     /*
-     * AXI lite slave interface
+     * AXI-Lite 从接口
      */
-    input  wire                   s_clk,
-    input  wire                   s_rst,
-    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,
-    input  wire [2:0]             s_axil_awprot,
-    input  wire                   s_axil_awvalid,
-    output wire                   s_axil_awready,
-    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,
-    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,
-    input  wire                   s_axil_wvalid,
-    output wire                   s_axil_wready,
-    output wire [1:0]             s_axil_bresp,
-    output wire                   s_axil_bvalid,
-    input  wire                   s_axil_bready,
-    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,
-    input  wire [2:0]             s_axil_arprot,
-    input  wire                   s_axil_arvalid,
-    output wire                   s_axil_arready,
-    output wire [DATA_WIDTH-1:0]  s_axil_rdata,
-    output wire [1:0]             s_axil_rresp,
-    output wire                   s_axil_rvalid,
-    input  wire                   s_axil_rready,
+    input  wire                   s_clk,           // 源时钟域时钟（从侧）。
+    input  wire                   s_rst,           // 源时钟域同步复位。
+    input  wire [ADDR_WIDTH-1:0]  s_axil_awaddr,   // 源时钟域 AW 地址。
+    input  wire [2:0]             s_axil_awprot,   // 源时钟域 AW 保护属性。
+    input  wire                   s_axil_awvalid,  // 源时钟域 AW 有效。
+    output wire                   s_axil_awready,  // 源时钟域 AW 就绪（来自写通道跨域模块）。
+    input  wire [DATA_WIDTH-1:0]  s_axil_wdata,    // 源时钟域 W 数据。
+    input  wire [STRB_WIDTH-1:0]  s_axil_wstrb,    // 源时钟域 W 字节使能。
+    input  wire                   s_axil_wvalid,   // 源时钟域 W 有效。
+    output wire                   s_axil_wready,   // 源时钟域 W 就绪（来自写通道跨域模块）。
+    output wire [1:0]             s_axil_bresp,    // 源时钟域 B 响应（跨域返回）。
+    output wire                   s_axil_bvalid,   // 源时钟域 B 有效（跨域返回）。
+    input  wire                   s_axil_bready,   // 源时钟域 B 就绪。
+    input  wire [ADDR_WIDTH-1:0]  s_axil_araddr,   // 源时钟域 AR 地址。
+    input  wire [2:0]             s_axil_arprot,   // 源时钟域 AR 保护属性。
+    input  wire                   s_axil_arvalid,  // 源时钟域 AR 有效。
+    output wire                   s_axil_arready,  // 源时钟域 AR 就绪（来自读通道跨域模块）。
+    output wire [DATA_WIDTH-1:0]  s_axil_rdata,    // 源时钟域 R 数据（跨域返回）。
+    output wire [1:0]             s_axil_rresp,    // 源时钟域 R 响应（跨域返回）。
+    output wire                   s_axil_rvalid,   // 源时钟域 R 有效（跨域返回）。
+    input  wire                   s_axil_rready,   // 源时钟域 R 就绪。
 
     /*
-     * AXI lite master interface
+     * AXI-Lite 主接口
      */
-    input  wire                   m_clk,
-    input  wire                   m_rst,
-    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,
-    output wire [2:0]             m_axil_awprot,
-    output wire                   m_axil_awvalid,
-    input  wire                   m_axil_awready,
-    output wire [DATA_WIDTH-1:0]  m_axil_wdata,
-    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,
-    output wire                   m_axil_wvalid,
-    input  wire                   m_axil_wready,
-    input  wire [1:0]             m_axil_bresp,
-    input  wire                   m_axil_bvalid,
-    output wire                   m_axil_bready,
-    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,
-    output wire [2:0]             m_axil_arprot,
-    output wire                   m_axil_arvalid,
-    input  wire                   m_axil_arready,
-    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,
-    input  wire [1:0]             m_axil_rresp,
-    input  wire                   m_axil_rvalid,
-    output wire                   m_axil_rready
+    input  wire                   m_clk,           // 目标时钟域时钟（主侧）。
+    input  wire                   m_rst,           // 目标时钟域同步复位。
+    output wire [ADDR_WIDTH-1:0]  m_axil_awaddr,   // 目标时钟域 AW 地址。
+    output wire [2:0]             m_axil_awprot,   // 目标时钟域 AW 保护属性。
+    output wire                   m_axil_awvalid,  // 目标时钟域 AW 有效（来自写通道跨域模块）。
+    input  wire                   m_axil_awready,  // 目标时钟域 AW 就绪（来自下游目标）。
+    output wire [DATA_WIDTH-1:0]  m_axil_wdata,    // 目标时钟域 W 数据（来自写通道跨域模块）。
+    output wire [STRB_WIDTH-1:0]  m_axil_wstrb,    // 目标时钟域 W 字节使能（来自写通道跨域模块）。
+    output wire                   m_axil_wvalid,   // 目标时钟域 W 有效（来自写通道跨域模块）。
+    input  wire                   m_axil_wready,   // 目标时钟域 W 就绪（来自下游目标）。
+    input  wire [1:0]             m_axil_bresp,    // 目标时钟域 B 响应（来自下游目标）。
+    input  wire                   m_axil_bvalid,   // 目标时钟域 B 有效（来自下游目标）。
+    output wire                   m_axil_bready,   // 目标时钟域 B 就绪（来自写通道跨域模块）。
+    output wire [ADDR_WIDTH-1:0]  m_axil_araddr,   // 目标时钟域 AR 地址（来自读通道跨域模块）。
+    output wire [2:0]             m_axil_arprot,   // 目标时钟域 AR 保护属性。
+    output wire                   m_axil_arvalid,  // 目标时钟域 AR 有效（来自读通道跨域模块）。
+    input  wire                   m_axil_arready,  // 目标时钟域 AR 就绪（来自下游目标）。
+    input  wire [DATA_WIDTH-1:0]  m_axil_rdata,    // 目标时钟域 R 数据（来自下游目标）。
+    input  wire [1:0]             m_axil_rresp,    // 目标时钟域 R 响应（来自下游目标）。
+    input  wire                   m_axil_rvalid,   // 目标时钟域 R 有效（来自下游目标）。
+    output wire                   m_axil_rready    // 目标时钟域 R 就绪（来自读通道跨域模块）。
 );
 
 axil_cdc_wr #(
@@ -99,7 +105,7 @@ axil_cdc_wr #(
 )
 axil_cdc_wr_inst (
     /*
-     * AXI lite slave interface
+     * AXI-Lite 从接口
      */
     .s_clk(s_clk),
     .s_rst(s_rst),
@@ -116,7 +122,7 @@ axil_cdc_wr_inst (
     .s_axil_bready(s_axil_bready),
 
     /*
-     * AXI lite master interface
+     * AXI-Lite 主接口
      */
     .m_clk(m_clk),
     .m_rst(m_rst),
@@ -140,7 +146,7 @@ axil_cdc_rd #(
 )
 axil_cdc_rd_inst (
     /*
-     * AXI lite slave interface
+     * AXI-Lite 从接口
      */
     .s_clk(s_clk),
     .s_rst(s_rst),
@@ -154,7 +160,7 @@ axil_cdc_rd_inst (
     .s_axil_rready(s_axil_rready),
 
     /*
-     * AXI lite master interface
+     * AXI-Lite 主接口
      */
     .m_clk(m_clk),
     .m_rst(m_rst),

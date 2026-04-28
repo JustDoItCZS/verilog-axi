@@ -22,98 +22,107 @@ THE SOFTWARE.
 
 */
 
-// Language: Verilog 2001
+// 语言: Verilog 2001
 
 `resetall
 `timescale 1ns / 1ps
 `default_nettype none
 
 /*
- * AXI4 lite crossbar (read)
+ * AXI4-Lite 交叉开关（读通道）
+ *
+ * 模块目录
+ * 1) 从端侧：
+ *    - 对每个 AR 请求做地址解码并发往唯一目标主端
+ *    - 将回程路由元数据（源从端 + decerr 标记）压入 FIFO
+ * 2) 主端侧：
+ *    - 对每个主端来自多个从端的 AR 请求进行仲裁
+ *    - 将返回 R 通道路由到记录的源从端
+ * 3) 通过 axil_register_rd 在从/主端两侧插入可选寄存器切片。
  */
 module axil_crossbar_rd #
 (
-    // Number of AXI inputs (slave interfaces)
+    // AXI 输入端口数量（从接口数量）
     parameter S_COUNT = 4,
-    // Number of AXI outputs (master interfaces)
+    // AXI 输出端口数量（主接口数量）
     parameter M_COUNT = 4,
-    // Width of data bus in bits
+    // 数据总线位宽
     parameter DATA_WIDTH = 32,
-    // Width of address bus in bits
+    // 地址总线位宽
     parameter ADDR_WIDTH = 32,
-    // Width of wstrb (width of data bus in words)
+    // WSTRB 位宽（按字节 lane）
     parameter STRB_WIDTH = (DATA_WIDTH/8),
-    // Number of concurrent operations for each slave interface
-    // S_COUNT concatenated fields of 32 bits
+    // 每个从接口可并发处理事务数量
+    // 格式：S_COUNT 个 32 位字段拼接
     parameter S_ACCEPT = {S_COUNT{32'd16}},
-    // Number of regions per master interface
+    // 每个主接口的地址区域数量
     parameter M_REGIONS = 1,
-    // Master interface base addresses
-    // M_COUNT concatenated fields of M_REGIONS concatenated fields of ADDR_WIDTH bits
-    // set to zero for default addressing based on M_ADDR_WIDTH
+    // 主接口基地址表
+    // 格式：M_COUNT 组，每组含 M_REGIONS 个 ADDR_WIDTH 位字段
+    // 置 0 时按 M_ADDR_WIDTH 自动生成默认地址映射
     parameter M_BASE_ADDR = 0,
-    // Master interface address widths
-    // M_COUNT concatenated fields of M_REGIONS concatenated fields of 32 bits
+    // 主接口地址宽度表
+    // 格式：M_COUNT 组，每组含 M_REGIONS 个 32 位字段
     parameter M_ADDR_WIDTH = {M_COUNT{{M_REGIONS{32'd24}}}},
-    // Read connections between interfaces
-    // M_COUNT concatenated fields of S_COUNT bits
+    // 接口间读通路连通矩阵
+    // 格式：M_COUNT 组，每组 S_COUNT 位
     parameter M_CONNECT = {M_COUNT{{S_COUNT{1'b1}}}},
-    // Number of concurrent operations for each master interface
-    // M_COUNT concatenated fields of 32 bits
+    // 每个主接口可并发处理事务数量
+    // 格式：M_COUNT 个 32 位字段拼接
     parameter M_ISSUE = {M_COUNT{32'd16}},
-    // Secure master (fail operations based on awprot/arprot)
-    // M_COUNT bits
+    // 安全主端口配置（基于 awprot/arprot 拒绝访问）
+    // M_COUNT 位
     parameter M_SECURE = {M_COUNT{1'b0}},
-    // Slave interface AR channel register type (input)
-    // 0 to bypass, 1 for simple buffer, 2 for skid buffer
+    // 从接口 AR 通道寄存器类型（输入侧）
+    // 0=直通，1=简单缓冲，2=skid buffer
     parameter S_AR_REG_TYPE = {S_COUNT{2'd0}},
-    // Slave interface R channel register type (output)
-    // 0 to bypass, 1 for simple buffer, 2 for skid buffer
+    // 从接口 R 通道寄存器类型（输出侧）
+    // 0=直通，1=简单缓冲，2=skid buffer
     parameter S_R_REG_TYPE = {S_COUNT{2'd2}},
-    // Master interface AR channel register type (output)
-    // 0 to bypass, 1 for simple buffer, 2 for skid buffer
+    // 主接口 AR 通道寄存器类型（输出侧）
+    // 0=直通，1=简单缓冲，2=skid buffer
     parameter M_AR_REG_TYPE = {M_COUNT{2'd1}},
-    // Master interface R channel register type (input)
-    // 0 to bypass, 1 for simple buffer, 2 for skid buffer
+    // 主接口 R 通道寄存器类型（输入侧）
+    // 0=直通，1=简单缓冲，2=skid buffer
     parameter M_R_REG_TYPE = {M_COUNT{2'd0}}
 )
 (
-    input  wire                             clk,
-    input  wire                             rst,
+    input  wire                             clk, // 读交叉开关时钟。
+    input  wire                             rst, // 同步复位，清空仲裁与 FIFO 状态。
 
     /*
-     * AXI lite slave interfaces
+     * AXI-Lite 从接口
      */
-    input  wire [S_COUNT*ADDR_WIDTH-1:0]    s_axil_araddr,
-    input  wire [S_COUNT*3-1:0]             s_axil_arprot,
-    input  wire [S_COUNT-1:0]               s_axil_arvalid,
-    output wire [S_COUNT-1:0]               s_axil_arready,
-    output wire [S_COUNT*DATA_WIDTH-1:0]    s_axil_rdata,
-    output wire [S_COUNT*2-1:0]             s_axil_rresp,
-    output wire [S_COUNT-1:0]               s_axil_rvalid,
-    input  wire [S_COUNT-1:0]               s_axil_rready,
+    input  wire [S_COUNT*ADDR_WIDTH-1:0]    s_axil_araddr, // 从端 AR 地址向量；每个从端一个切片。
+    input  wire [S_COUNT*3-1:0]             s_axil_arprot, // 从端 AR 保护属性向量。
+    input  wire [S_COUNT-1:0]               s_axil_arvalid, // 从端 ARVALID 向量。
+    output wire [S_COUNT-1:0]               s_axil_arready, // 从端 ARREADY 向量（由解码接纳链路返回）。
+    output wire [S_COUNT*DATA_WIDTH-1:0]    s_axil_rdata, // 从端读数据向量。
+    output wire [S_COUNT*2-1:0]             s_axil_rresp, // 从端读响应向量（含注入 DECERR）。
+    output wire [S_COUNT-1:0]               s_axil_rvalid, // 从端 RVALID 向量。
+    input  wire [S_COUNT-1:0]               s_axil_rready, // 从端 RREADY 向量（端口级反压）。
 
     /*
-     * AXI lite master interfaces
+     * AXI-Lite 主接口
      */
-    output wire [M_COUNT*ADDR_WIDTH-1:0]    m_axil_araddr,
-    output wire [M_COUNT*3-1:0]             m_axil_arprot,
-    output wire [M_COUNT-1:0]               m_axil_arvalid,
-    input  wire [M_COUNT-1:0]               m_axil_arready,
-    input  wire [M_COUNT*DATA_WIDTH-1:0]    m_axil_rdata,
-    input  wire [M_COUNT*2-1:0]             m_axil_rresp,
-    input  wire [M_COUNT-1:0]               m_axil_rvalid,
-    output wire [M_COUNT-1:0]               m_axil_rready
+    output wire [M_COUNT*ADDR_WIDTH-1:0]    m_axil_araddr, // 主端 AR 地址向量（仲裁后输出）。
+    output wire [M_COUNT*3-1:0]             m_axil_arprot, // 主端 AR 保护属性向量。
+    output wire [M_COUNT-1:0]               m_axil_arvalid, // 主端 ARVALID 向量。
+    input  wire [M_COUNT-1:0]               m_axil_arready, // 下游目标返回的主端 ARREADY 向量。
+    input  wire [M_COUNT*DATA_WIDTH-1:0]    m_axil_rdata, // 目标返回的主端读数据向量。
+    input  wire [M_COUNT*2-1:0]             m_axil_rresp, // 目标返回的主端读响应向量。
+    input  wire [M_COUNT-1:0]               m_axil_rvalid, // 目标返回的主端 RVALID 向量。
+    output wire [M_COUNT-1:0]               m_axil_rready // 由回程路由驱动的主端 RREADY 向量。
 );
 
-parameter CL_S_COUNT = $clog2(S_COUNT);
-parameter CL_M_COUNT = $clog2(M_COUNT);
-parameter M_COUNT_P1 = M_COUNT+1;
-parameter CL_M_COUNT_P1 = $clog2(M_COUNT_P1);
+parameter CL_S_COUNT = $clog2(S_COUNT); // 编码从端索引所需位宽。
+parameter CL_M_COUNT = $clog2(M_COUNT); // 编码主端索引所需位宽。
+parameter M_COUNT_P1 = M_COUNT+1; // 辅助计数：主端数量加 1。
+parameter CL_M_COUNT_P1 = $clog2(M_COUNT_P1); // M_COUNT_P1 对应编码位宽。
 
-integer i;
+integer i; // 静态配置检查循环变量。
 
-// check configuration
+// 配置合法性检查
 initial begin
     for (i = 0; i < M_COUNT*M_REGIONS; i = i + 1) begin
         if (M_ADDR_WIDTH[i*32 +: 32] && (M_ADDR_WIDTH[i*32 +: 32] < $clog2(STRB_WIDTH) || M_ADDR_WIDTH[i*32 +: 32] > ADDR_WIDTH)) begin
@@ -123,51 +132,51 @@ initial begin
     end
 end
 
-wire [S_COUNT*ADDR_WIDTH-1:0]    int_s_axil_araddr;
-wire [S_COUNT*3-1:0]             int_s_axil_arprot;
-wire [S_COUNT-1:0]               int_s_axil_arvalid;
-wire [S_COUNT-1:0]               int_s_axil_arready;
+wire [S_COUNT*ADDR_WIDTH-1:0]    int_s_axil_araddr; // 内部从端 AR 地址（经过可选 S 侧寄存器）。
+wire [S_COUNT*3-1:0]             int_s_axil_arprot; // 内部从端 AR 保护属性。
+wire [S_COUNT-1:0]               int_s_axil_arvalid; // 进入解码逻辑的内部 ARVALID。
+wire [S_COUNT-1:0]               int_s_axil_arready; // 解码逻辑返回的内部 ARREADY。
 
-wire [S_COUNT*M_COUNT-1:0]       int_axil_arvalid;
-wire [M_COUNT*S_COUNT-1:0]       int_axil_arready;
+wire [S_COUNT*M_COUNT-1:0]       int_axil_arvalid; // 交叉点 ARVALID 矩阵 [slave][master]。
+wire [M_COUNT*S_COUNT-1:0]       int_axil_arready; // 交叉点 ARREADY 矩阵 [master][slave]。
 
-wire [M_COUNT*DATA_WIDTH-1:0]    int_m_axil_rdata;
-wire [M_COUNT*2-1:0]             int_m_axil_rresp;
-wire [M_COUNT-1:0]               int_m_axil_rvalid;
-wire [M_COUNT-1:0]               int_m_axil_rready;
+wire [M_COUNT*DATA_WIDTH-1:0]    int_m_axil_rdata; // 内部主端 RDATA 向量（经过 M 侧寄存器）。
+wire [M_COUNT*2-1:0]             int_m_axil_rresp; // 内部主端 RRESP 向量。
+wire [M_COUNT-1:0]               int_m_axil_rvalid; // 内部主端 RVALID。
+wire [M_COUNT-1:0]               int_m_axil_rready; // 内部主端 RREADY。
 
-wire [M_COUNT*S_COUNT-1:0]       int_axil_rvalid;
-wire [S_COUNT*M_COUNT-1:0]       int_axil_rready;
+wire [M_COUNT*S_COUNT-1:0]       int_axil_rvalid; // 交叉点 RVALID 矩阵 [master][slave]。
+wire [S_COUNT*M_COUNT-1:0]       int_axil_rready; // 交叉点 RREADY 矩阵 [slave][master]。
 
 generate
 
     genvar m, n;
 
     for (m = 0; m < S_COUNT; m = m + 1) begin : s_ifaces
-        // response routing FIFO
-        localparam FIFO_ADDR_WIDTH = $clog2(S_ACCEPT[m*32 +: 32])+1;
+        // 响应路由 FIFO
+        localparam FIFO_ADDR_WIDTH = $clog2(S_ACCEPT[m*32 +: 32])+1; // 每个从端回程路由 FIFO 深度控制位宽。
 
-        reg [FIFO_ADDR_WIDTH+1-1:0] fifo_wr_ptr_reg = 0;
-        reg [FIFO_ADDR_WIDTH+1-1:0] fifo_rd_ptr_reg = 0;
+        reg [FIFO_ADDR_WIDTH+1-1:0] fifo_wr_ptr_reg = 0; // 写指针：解码元数据入队时递增。
+        reg [FIFO_ADDR_WIDTH+1-1:0] fifo_rd_ptr_reg = 0; // 读指针：从端消费 R 响应时递增。
 
         (* ram_style = "distributed", ramstyle = "no_rw_check, mlab" *)
-        reg [CL_M_COUNT-1:0] fifo_select[(2**FIFO_ADDR_WIDTH)-1:0];
+        reg [CL_M_COUNT-1:0] fifo_select[(2**FIFO_ADDR_WIDTH)-1:0]; // 每个在途读事务记录目标主端索引。
         (* ram_style = "distributed", ramstyle = "no_rw_check, mlab" *)
-        reg fifo_decerr[(2**FIFO_ADDR_WIDTH)-1:0];
+        reg fifo_decerr[(2**FIFO_ADDR_WIDTH)-1:0]; // 记录解码错误标记，用于本地合成 DECERR 响应。
 
-        wire [CL_M_COUNT-1:0] fifo_wr_select;
-        wire fifo_wr_decerr;
-        wire fifo_wr_en;
+        wire [CL_M_COUNT-1:0] fifo_wr_select; // FIFO 写入内容：选中主端索引。
+        wire fifo_wr_decerr; // FIFO 写入内容：解码错误标志。
+        wire fifo_wr_en; // FIFO 写使能：响应命令元数据被接纳时拉高。
 
-        reg [CL_M_COUNT-1:0] fifo_rd_select_reg = 0;
-        reg fifo_rd_decerr_reg = 0;
-        reg fifo_rd_valid_reg = 0;
-        wire fifo_rd_en;
-        reg fifo_half_full_reg = 1'b0;
+        reg [CL_M_COUNT-1:0] fifo_rd_select_reg = 0; // 锁存的路由选择，用于读响应复用。
+        reg fifo_rd_decerr_reg = 0; // 锁存当前路由响应的解码错误状态。
+        reg fifo_rd_valid_reg = 0; // 指示 fifo_rd_* 元数据有效。
+        wire fifo_rd_en; // FIFO 出队：源从端 R 握手成功时触发。
+        reg fifo_half_full_reg = 1'b0; // 高水位标志：节流新解码命令进入。
 
-        wire fifo_empty = fifo_rd_ptr_reg == fifo_wr_ptr_reg;
+        wire fifo_empty = fifo_rd_ptr_reg == fifo_wr_ptr_reg; // FIFO 空标志，用于控制元数据预取。
 
-        integer i;
+        integer i; // 本地 FIFO RAM 初始化循环变量。
 
         initial begin
             for (i = 0; i < 2**FIFO_ADDR_WIDTH; i = i + 1) begin
@@ -201,16 +210,16 @@ generate
             end
         end
 
-        // address decode and admission control
-        wire [CL_M_COUNT-1:0] a_select;
+        // 地址解码与接纳控制
+        wire [CL_M_COUNT-1:0] a_select; // 当前从端 AR 解码得到的目标主端索引。
 
-        wire m_axil_avalid;
-        wire m_axil_aready;
+        wire m_axil_avalid; // 解码后送往目标选择矩阵的 AR 有效信号。
+        wire m_axil_aready; // 选中主端 AR 通路返回的 ready。
 
-        wire [CL_M_COUNT-1:0] m_rc_select;
-        wire m_rc_decerr;
-        wire m_rc_valid;
-        wire m_rc_ready;
+        wire [CL_M_COUNT-1:0] m_rc_select; // 压入 FIFO 的响应命令目标索引。
+        wire m_rc_decerr; // 响应命令解码错误标记。
+        wire m_rc_valid; // 解码器输出的响应命令有效信号。
+        wire m_rc_ready; // 本地 FIFO 写端返回的响应命令就绪信号。
 
         axil_crossbar_addr #(
             .S(m),
@@ -229,7 +238,7 @@ generate
             .rst(rst),
 
             /*
-             * Address input
+             * 地址输入
              */
             .s_axil_aaddr(int_s_axil_araddr[m*ADDR_WIDTH +: ADDR_WIDTH]),
             .s_axil_aprot(int_s_axil_arprot[m*3 +: 3]),
@@ -237,14 +246,14 @@ generate
             .s_axil_aready(int_s_axil_arready[m]),
 
             /*
-             * Address output
+             * 地址输出
              */
             .m_select(a_select),
             .m_axil_avalid(m_axil_avalid),
             .m_axil_aready(m_axil_aready),
 
             /*
-             * Write command output
+             * 写命令输出
              */
             .m_wc_select(),
             .m_wc_decerr(),
@@ -252,7 +261,7 @@ generate
             .m_wc_ready(1'b1),
 
             /*
-             * Response command output
+             * 响应命令输出
              */
             .m_rc_select(m_rc_select),
             .m_rc_decerr(m_rc_decerr),
@@ -263,28 +272,28 @@ generate
         assign int_axil_arvalid[m*M_COUNT +: M_COUNT] = m_axil_avalid << a_select;
         assign m_axil_aready = int_axil_arready[a_select*S_COUNT+m];
 
-        // response handling
+        // 响应处理
         assign fifo_wr_select = m_rc_select;
         assign fifo_wr_decerr = m_rc_decerr;
         assign fifo_wr_en = m_rc_valid && !fifo_half_full_reg;
         assign m_rc_ready = !fifo_half_full_reg;
 
-        // write response handling
-        wire [CL_M_COUNT-1:0] r_select = M_COUNT > 1 ? fifo_rd_select_reg : 0;
-        wire r_decerr = fifo_rd_decerr_reg;
-        wire r_valid = fifo_rd_valid_reg;
+        // 读响应处理
+        wire [CL_M_COUNT-1:0] r_select = M_COUNT > 1 ? fifo_rd_select_reg : 0; // 当前返回响应选中的主端索引。
+        wire r_decerr = fifo_rd_decerr_reg; // 置位时该响应为本地合成 DECERR。
+        wire r_valid = fifo_rd_valid_reg; // 响应元数据有效标记。
 
-        // read response mux
-        wire [DATA_WIDTH-1:0]  m_axil_rdata_mux  = r_decerr ? {DATA_WIDTH{1'b0}} : int_m_axil_rdata[r_select*DATA_WIDTH +: DATA_WIDTH];
-        wire [1:0]             m_axil_rresp_mux  = r_decerr ? 2'b11 : int_m_axil_rresp[r_select*2 +: 2];
-        wire                   m_axil_rvalid_mux = (r_decerr ? 1'b1 : int_axil_rvalid[r_select*S_COUNT+m]) && r_valid;
-        wire                   m_axil_rready_mux;
+        // 读响应复用
+        wire [DATA_WIDTH-1:0]  m_axil_rdata_mux  = r_decerr ? {DATA_WIDTH{1'b0}} : int_m_axil_rdata[r_select*DATA_WIDTH +: DATA_WIDTH]; // 路由或合成后的 RDATA，返回当前从端。
+        wire [1:0]             m_axil_rresp_mux  = r_decerr ? 2'b11 : int_m_axil_rresp[r_select*2 +: 2]; // 路由或合成后的 RRESP。
+        wire                   m_axil_rvalid_mux = (r_decerr ? 1'b1 : int_axil_rvalid[r_select*S_COUNT+m]) && r_valid; // 被选响应可用时拉高 RVALID。
+        wire                   m_axil_rready_mux; // 从端寄存器切片返回的 RREADY。
 
         assign int_axil_rready[m*M_COUNT +: M_COUNT] = (r_valid && m_axil_rready_mux) << r_select;
 
         assign fifo_rd_en = m_axil_rvalid_mux && m_axil_rready_mux && r_valid;
 
-        // S side register
+        // S 侧寄存器切片
         axil_register_rd #(
             .DATA_WIDTH(DATA_WIDTH),
             .ADDR_WIDTH(ADDR_WIDTH),
@@ -312,25 +321,25 @@ generate
             .m_axil_rvalid(m_axil_rvalid_mux),
             .m_axil_rready(m_axil_rready_mux)
         );
-    end // s_ifaces
+    end // 从端接口循环
 
     for (n = 0; n < M_COUNT; n = n + 1) begin : m_ifaces
-        // response routing FIFO
-        localparam FIFO_ADDR_WIDTH = $clog2(M_ISSUE[n*32 +: 32])+1;
+        // 响应路由 FIFO
+        localparam FIFO_ADDR_WIDTH = $clog2(M_ISSUE[n*32 +: 32])+1; // 每个主端来源路由 FIFO 深度控制位宽。
 
-        reg [FIFO_ADDR_WIDTH+1-1:0] fifo_wr_ptr_reg = 0;
-        reg [FIFO_ADDR_WIDTH+1-1:0] fifo_rd_ptr_reg = 0;
+        reg [FIFO_ADDR_WIDTH+1-1:0] fifo_wr_ptr_reg = 0; // 写指针：AR 请求被接纳时递增。
+        reg [FIFO_ADDR_WIDTH+1-1:0] fifo_rd_ptr_reg = 0; // 读指针：对应 R 数据拍握手时递增。
 
         (* ram_style = "distributed", ramstyle = "no_rw_check, mlab" *)
-        reg [CL_S_COUNT-1:0] fifo_select[(2**FIFO_ADDR_WIDTH)-1:0];
-        wire [CL_S_COUNT-1:0] fifo_wr_select;
-        wire fifo_wr_en;
-        wire fifo_rd_en;
-        reg fifo_half_full_reg = 1'b0;
+        reg [CL_S_COUNT-1:0] fifo_select[(2**FIFO_ADDR_WIDTH)-1:0]; // 为发往该主端的每个在途请求记录源从端 ID。
+        wire [CL_S_COUNT-1:0] fifo_wr_select; // FIFO 写入内容：仲裁授予的源从端 ID。
+        wire fifo_wr_en; // FIFO 写使能：AR 接纳时拉高。
+        wire fifo_rd_en; // FIFO 读使能：R 接纳时拉高。
+        reg fifo_half_full_reg = 1'b0; // 高水位反压标志：用于仲裁节流。
 
-        wire fifo_empty = fifo_rd_ptr_reg == fifo_wr_ptr_reg;
+        wire fifo_empty = fifo_rd_ptr_reg == fifo_wr_ptr_reg; // FIFO 空标志（该主端无待返回响应）。
 
-        integer i;
+        integer i; // 本地来源路由 FIFO RAM 初始化循环变量。
 
         initial begin
             for (i = 0; i < 2**FIFO_ADDR_WIDTH; i = i + 1) begin
@@ -355,12 +364,12 @@ generate
             end
         end
 
-        // address arbitration
-        wire [S_COUNT-1:0] a_request;
-        wire [S_COUNT-1:0] a_acknowledge;
-        wire [S_COUNT-1:0] a_grant;
-        wire a_grant_valid;
-        wire [CL_S_COUNT-1:0] a_grant_encoded;
+        // 地址仲裁
+        wire [S_COUNT-1:0] a_request; // 来自目标该主端从端请求向量。
+        wire [S_COUNT-1:0] a_acknowledge; // AR 握手成功时仲裁确认位。
+        wire [S_COUNT-1:0] a_grant; // 仲裁 one-hot 授予向量。
+        wire a_grant_valid; // 仲裁器产生有效获胜者时置位。
+        wire [CL_S_COUNT-1:0] a_grant_encoded; // 获胜从端编码索引。
 
         arbiter #(
             .PORTS(S_COUNT),
@@ -379,11 +388,11 @@ generate
             .grant_encoded(a_grant_encoded)
         );
 
-        // address mux
-        wire [ADDR_WIDTH-1:0]  s_axil_araddr_mux   = int_s_axil_araddr[a_grant_encoded*ADDR_WIDTH +: ADDR_WIDTH];
-        wire [2:0]             s_axil_arprot_mux   = int_s_axil_arprot[a_grant_encoded*3 +: 3];
-        wire                   s_axil_arvalid_mux  = int_axil_arvalid[a_grant_encoded*M_COUNT+n] && a_grant_valid;
-        wire                   s_axil_arready_mux;
+        // 地址复用
+        wire [ADDR_WIDTH-1:0]  s_axil_araddr_mux   = int_s_axil_araddr[a_grant_encoded*ADDR_WIDTH +: ADDR_WIDTH]; // 来自获胜源从端的 AR 地址。
+        wire [2:0]             s_axil_arprot_mux   = int_s_axil_arprot[a_grant_encoded*3 +: 3]; // 来自获胜源从端的 AR 保护位。
+        wire                   s_axil_arvalid_mux  = int_axil_arvalid[a_grant_encoded*M_COUNT+n] && a_grant_valid; // 送往该主端的复用 ARVALID。
+        wire                   s_axil_arready_mux; // M 侧寄存器切片返回的 ARREADY。
 
         assign int_axil_arready[n*S_COUNT +: S_COUNT] = (a_grant_valid && s_axil_arready_mux) << a_grant_encoded;
 
@@ -395,15 +404,15 @@ generate
         assign fifo_wr_select = a_grant_encoded;
         assign fifo_wr_en = s_axil_arvalid_mux && s_axil_arready_mux && a_grant_valid;
 
-        // read response forwarding
-        wire [CL_S_COUNT-1:0] r_select = S_COUNT > 1 ? fifo_select[fifo_rd_ptr_reg[FIFO_ADDR_WIDTH-1:0]] : 0;
+        // 读响应回传
+        wire [CL_S_COUNT-1:0] r_select = S_COUNT > 1 ? fifo_select[fifo_rd_ptr_reg[FIFO_ADDR_WIDTH-1:0]] : 0; // 应接收当前返回 R 响应的源从端。
 
         assign int_axil_rvalid[n*S_COUNT +: S_COUNT] = int_m_axil_rvalid[n] << r_select;
         assign int_m_axil_rready[n] = int_axil_rready[r_select*M_COUNT+n];
 
         assign fifo_rd_en = int_m_axil_rvalid[n] && int_m_axil_rready[n];
 
-        // M side register
+        // M 侧寄存器切片
         axil_register_rd #(
             .DATA_WIDTH(DATA_WIDTH),
             .ADDR_WIDTH(ADDR_WIDTH),
@@ -431,7 +440,7 @@ generate
             .m_axil_rvalid(m_axil_rvalid[n]),
             .m_axil_rready(m_axil_rready[n])
         );
-    end // m_ifaces
+    end // 主端接口循环
 
 endgenerate
 

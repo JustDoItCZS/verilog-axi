@@ -22,65 +22,70 @@ THE SOFTWARE.
 
 */
 
-// Language: Verilog 2001
+// 语言: Verilog 2001
 
 `resetall
 `timescale 1ns / 1ps
 `default_nettype none
 
 /*
- * AXI4 virtual FIFO (encoder)
+ * AXI4 虚拟 FIFO（编码器）
+ *
+ * 模块目录
+ * 1) 把 AXIS 输入帧按段编码为虚拟 FIFO 通道数据与控制头。
+ * 2) 维护输入数据 FIFO 与头信息 FIFO，支持按块提交与超时拆包。
+ * 3) 负责把 tid/tdest/tuser 元数据压入头部并在输出阶段恢复控制结构。
  */
 module axi_vfifo_enc #
 (
-    // Width of input segment
+    // 输入分段位宽
     parameter SEG_WIDTH = 32,
-    // Segment count
+    // 分段数量
     parameter SEG_CNT = 2,
-    // Width of AXI stream interfaces in bits
+    // AXI-Stream 接口位宽
     parameter AXIS_DATA_WIDTH = SEG_WIDTH*SEG_CNT/2,
-    // Use AXI stream tkeep signal
+    // 是否启用 AXI-Stream tkeep
     parameter AXIS_KEEP_ENABLE = (AXIS_DATA_WIDTH>8),
-    // AXI stream tkeep signal width (words per cycle)
+    // AXI-Stream tkeep 位宽（每拍字节数）
     parameter AXIS_KEEP_WIDTH = (AXIS_DATA_WIDTH/8),
-    // Use AXI stream tlast signal
+    // 是否启用 AXI-Stream tlast
     parameter AXIS_LAST_ENABLE = 1,
-    // Propagate AXI stream tid signal
+    // 是否透传 AXI-Stream tid
     parameter AXIS_ID_ENABLE = 0,
-    // AXI stream tid signal width
+    // AXI-Stream tid 位宽
     parameter AXIS_ID_WIDTH = 8,
-    // Propagate AXI stream tdest signal
+    // 是否透传 AXI-Stream tdest
     parameter AXIS_DEST_ENABLE = 0,
-    // AXI stream tdest signal width
+    // AXI-Stream tdest 位宽
     parameter AXIS_DEST_WIDTH = 8,
-    // Propagate AXI stream tuser signal
+    // 是否透传 AXI-Stream tuser
     parameter AXIS_USER_ENABLE = 1,
-    // AXI stream tuser signal width
+    // AXI-Stream tuser 位宽
     parameter AXIS_USER_WIDTH = 1
 )
 (
-    input  wire                          clk,
-    input  wire                          rst,
+    input  wire                          clk, // 编码器时钟。
+    input  wire                          rst, // 同步复位，高电平有效。
 
     /*
-     * AXI stream data input
+     * AXI-Stream 数据输入
      */
-    input  wire [AXIS_DATA_WIDTH-1:0]    s_axis_tdata,
-    input  wire [AXIS_KEEP_WIDTH-1:0]    s_axis_tkeep,
-    input  wire                          s_axis_tvalid,
-    output wire                          s_axis_tready,
-    input  wire                          s_axis_tlast,
-    input  wire [AXIS_ID_WIDTH-1:0]      s_axis_tid,
-    input  wire [AXIS_DEST_WIDTH-1:0]    s_axis_tdest,
-    input  wire [AXIS_USER_WIDTH-1:0]    s_axis_tuser,
+    input  wire [AXIS_DATA_WIDTH-1:0]    s_axis_tdata, // AXIS 输入 tdata。
+    input  wire [AXIS_KEEP_WIDTH-1:0]    s_axis_tkeep, // AXIS 输入 tkeep。
+    input  wire                          s_axis_tvalid, // AXIS 输入 tvalid。
+    output wire                          s_axis_tready, // AXIS 输入 tready。
+    input  wire                          s_axis_tlast, // AXIS 输入 tlast。
+    input  wire [AXIS_ID_WIDTH-1:0]      s_axis_tid, // AXIS 输入 tid。
+    input  wire [AXIS_DEST_WIDTH-1:0]    s_axis_tdest, // AXIS 输入 tdest。
+    input  wire [AXIS_USER_WIDTH-1:0]    s_axis_tuser, // AXIS 输入 tuser。
 
     /*
-     * Segmented data output (to virtual FIFO channel)
+     * 分段数据输出（到虚拟 FIFO 通道）
      */
-    input  wire                          fifo_rst_in,
-    output wire [SEG_CNT*SEG_WIDTH-1:0]  output_data,
-    output wire [SEG_CNT-1:0]            output_valid,
-    input  wire                          fifo_watermark_in
+    input  wire                          fifo_rst_in, // 来自虚拟 FIFO 通道的同步复位请求。
+    output wire [SEG_CNT*SEG_WIDTH-1:0]  output_data, // 分段数据输出总线。
+    output wire [SEG_CNT-1:0]            output_valid, // 分段数据有效位。
+    input  wire                          fifo_watermark_in // 下游水位告警输入(触发提前提交)。
 );
 
 parameter AXIS_KEEP_WIDTH_INT = AXIS_KEEP_ENABLE ? AXIS_KEEP_WIDTH : 1;
@@ -125,7 +130,7 @@ parameter INPUT_FIFO_SIZE = SEG_BYTE_LANES * SEG_CNT_INT * 2**INPUT_FIFO_ADDR_WI
 
 parameter MAX_BLOCK_LEN = INPUT_FIFO_SIZE / 2 > 4096 ? 4096 : INPUT_FIFO_SIZE / 2;
 
-// validate parameters
+// 参数检查
 initial begin
     if (AXIS_BYTE_SIZE * AXIS_KEEP_WIDTH_INT != AXIS_DATA_WIDTH) begin
         $error("Error: AXI stream data width not evenly divisible (instance %m)");
@@ -143,50 +148,50 @@ initial begin
     end
 end
 
-reg [INPUT_FIFO_PTR_WIDTH+1-1:0] input_fifo_wr_ptr_reg = 0, input_fifo_wr_ptr_next;
-reg [INPUT_FIFO_PTR_WIDTH+1-1:0] input_fifo_rd_ptr_reg = 0, input_fifo_rd_ptr_next;
-reg [HDR_FIFO_PTR_WIDTH+1-1:0] hdr_fifo_wr_ptr_reg = 0, hdr_fifo_wr_ptr_next;
-reg [HDR_FIFO_PTR_WIDTH+1-1:0] hdr_fifo_rd_ptr_reg = 0, hdr_fifo_rd_ptr_next;
+reg [INPUT_FIFO_PTR_WIDTH+1-1:0] input_fifo_wr_ptr_reg = 0, input_fifo_wr_ptr_next; // 输入数据 FIFO 写指针。
+reg [INPUT_FIFO_PTR_WIDTH+1-1:0] input_fifo_rd_ptr_reg = 0, input_fifo_rd_ptr_next; // 输入数据 FIFO 读指针。
+reg [HDR_FIFO_PTR_WIDTH+1-1:0] hdr_fifo_wr_ptr_reg = 0, hdr_fifo_wr_ptr_next; // 头信息 FIFO 写指针。
+reg [HDR_FIFO_PTR_WIDTH+1-1:0] hdr_fifo_rd_ptr_reg = 0, hdr_fifo_rd_ptr_next; // 头信息 FIFO 读指针。
 
-reg [SEG_CNT_INT-1:0] mem_rd_data_valid_reg = 0, mem_rd_data_valid_next;
-reg hdr_mem_rd_data_valid_reg = 0, hdr_mem_rd_data_valid_next;
+reg [SEG_CNT_INT-1:0] mem_rd_data_valid_reg = 0, mem_rd_data_valid_next; // 输入段 RAM 读数据有效标志。
+reg hdr_mem_rd_data_valid_reg = 0, hdr_mem_rd_data_valid_next; // 头信息 RAM 读数据有效标志。
 
-reg [AXIS_DATA_WIDTH-1:0] int_seg_data;
-reg [AXIS_SEG_CNT-1:0] int_seg_valid;
+reg [AXIS_DATA_WIDTH-1:0] int_seg_data; // 按分段展开的输入数据。
+reg [AXIS_SEG_CNT-1:0] int_seg_valid; // 按分段展开的输入有效位。
 
-reg [SEG_CNT_INT*SEG_WIDTH-1:0] seg_mem_wr_data;
-reg [SEG_CNT_INT-1:0] seg_mem_wr_valid;
-reg [SEG_CNT_INT*INPUT_FIFO_ADDR_WIDTH-1:0] seg_mem_wr_addr_reg = 0, seg_mem_wr_addr_next;
-reg [SEG_CNT_INT-1:0] seg_mem_wr_en;
-reg [SEG_CNT_INT*SEG_IDX_WIDTH-1:0] seg_mem_wr_sel;
+reg [SEG_CNT_INT*SEG_WIDTH-1:0] seg_mem_wr_data; // 段 RAM 写数据总线。
+reg [SEG_CNT_INT-1:0] seg_mem_wr_valid; // 段 RAM 每段写有效。
+reg [SEG_CNT_INT*INPUT_FIFO_ADDR_WIDTH-1:0] seg_mem_wr_addr_reg = 0, seg_mem_wr_addr_next; // 段 RAM 每段写地址。
+reg [SEG_CNT_INT-1:0] seg_mem_wr_en; // 段 RAM 每段写使能。
+reg [SEG_CNT_INT*SEG_IDX_WIDTH-1:0] seg_mem_wr_sel; // 段 RAM 写数据源段选择。
 
-wire [SEG_CNT_INT*SEG_WIDTH-1:0] seg_mem_rd_data;
-reg [SEG_CNT_INT*INPUT_FIFO_ADDR_WIDTH-1:0] seg_mem_rd_addr_reg = 0, seg_mem_rd_addr_next;
-reg [SEG_CNT_INT-1:0] seg_mem_rd_en;
+wire [SEG_CNT_INT*SEG_WIDTH-1:0] seg_mem_rd_data; // 段 RAM 读数据总线。
+reg [SEG_CNT_INT*INPUT_FIFO_ADDR_WIDTH-1:0] seg_mem_rd_addr_reg = 0, seg_mem_rd_addr_next; // 段 RAM 每段读地址。
+reg [SEG_CNT_INT-1:0] seg_mem_rd_en; // 段 RAM 每段读使能。
 
-reg [HDR_LEN_WIDTH-1:0] hdr_mem_wr_len;
-reg hdr_mem_wr_last;
-reg [META_WIDTH-1:0] hdr_mem_wr_meta;
-reg [HDR_FIFO_ADDR_WIDTH-1:0] hdr_mem_wr_addr;
-reg hdr_mem_wr_en;
+reg [HDR_LEN_WIDTH-1:0] hdr_mem_wr_len; // 头 RAM 写入长度字段。
+reg hdr_mem_wr_last; // 头 RAM 写入 last 标志。
+reg [META_WIDTH-1:0] hdr_mem_wr_meta; // 头 RAM 写入元数据。
+reg [HDR_FIFO_ADDR_WIDTH-1:0] hdr_mem_wr_addr; // 头 RAM 写地址。
+reg hdr_mem_wr_en; // 头 RAM 写使能。
 
-wire [HDR_LEN_WIDTH-1:0] hdr_mem_rd_len;
-wire hdr_mem_rd_last;
-wire [META_WIDTH-1:0] hdr_mem_rd_meta;
-reg [HDR_FIFO_ADDR_WIDTH-1:0] hdr_mem_rd_addr_reg = 0, hdr_mem_rd_addr_next;
-reg hdr_mem_rd_en;
+wire [HDR_LEN_WIDTH-1:0] hdr_mem_rd_len; // 头 RAM 读出长度字段。
+wire hdr_mem_rd_last; // 头 RAM 读出 last 标志。
+wire [META_WIDTH-1:0] hdr_mem_rd_meta; // 头 RAM 读出元数据。
+reg [HDR_FIFO_ADDR_WIDTH-1:0] hdr_mem_rd_addr_reg = 0, hdr_mem_rd_addr_next; // 头 RAM 读地址寄存器。
+reg hdr_mem_rd_en; // 头 RAM 读使能。
 
-reg input_fifo_full_reg = 1'b0;
-reg input_fifo_half_full_reg = 1'b0;
-reg input_fifo_empty_reg = 1'b1;
-reg [INPUT_FIFO_PTR_WIDTH+1-1:0] input_fifo_count_reg = 0;
-reg hdr_fifo_full_reg = 1'b0;
-reg hdr_fifo_half_full_reg = 1'b0;
-reg hdr_fifo_empty_reg = 1'b1;
-reg [HDR_FIFO_PTR_WIDTH+1-1:0] hdr_fifo_count_reg = 0;
+reg input_fifo_full_reg = 1'b0; // 输入数据 FIFO 满标志。
+reg input_fifo_half_full_reg = 1'b0; // 输入数据 FIFO 半满标志。
+reg input_fifo_empty_reg = 1'b1; // 输入数据 FIFO 空标志。
+reg [INPUT_FIFO_PTR_WIDTH+1-1:0] input_fifo_count_reg = 0; // 输入数据 FIFO 占用计数。
+reg hdr_fifo_full_reg = 1'b0; // 头信息 FIFO 满标志。
+reg hdr_fifo_half_full_reg = 1'b0; // 头信息 FIFO 半满标志。
+reg hdr_fifo_empty_reg = 1'b1; // 头信息 FIFO 空标志。
+reg [HDR_FIFO_PTR_WIDTH+1-1:0] hdr_fifo_count_reg = 0; // 头信息 FIFO 占用计数。
 
-reg [SEG_CNT*SEG_WIDTH-1:0] output_data_reg = 0, output_data_next;
-reg [SEG_CNT-1:0] output_valid_reg = 0, output_valid_next;
+reg [SEG_CNT*SEG_WIDTH-1:0] output_data_reg = 0, output_data_next; // 分段输出数据寄存器。
+reg [SEG_CNT-1:0] output_valid_reg = 0, output_valid_next; // 分段输出有效寄存器。
 
 assign s_axis_tready = !input_fifo_full_reg && !hdr_fifo_full_reg && !fifo_rst_in;
 
@@ -200,15 +205,15 @@ genvar n;
 for (n = 0; n < SEG_CNT_INT; n = n + 1) begin : seg_ram
 
     (* ram_style = "distributed", ramstyle = "no_rw_check, mlab" *)
-    reg [SEG_WIDTH-1:0] seg_mem_data[2**INPUT_FIFO_ADDR_WIDTH-1:0];
+    reg [SEG_WIDTH-1:0] seg_mem_data[2**INPUT_FIFO_ADDR_WIDTH-1:0]; // 第 n 段输入数据 RAM。
 
-    wire wr_en = seg_mem_wr_en[n];
-    wire [INPUT_FIFO_ADDR_WIDTH-1:0] wr_addr = seg_mem_wr_addr_reg[n*INPUT_FIFO_ADDR_WIDTH +: INPUT_FIFO_ADDR_WIDTH];
-    wire [SEG_WIDTH-1:0] wr_data = seg_mem_wr_data[n*SEG_WIDTH +: SEG_WIDTH];
+    wire wr_en = seg_mem_wr_en[n]; // 第 n 段写使能。
+    wire [INPUT_FIFO_ADDR_WIDTH-1:0] wr_addr = seg_mem_wr_addr_reg[n*INPUT_FIFO_ADDR_WIDTH +: INPUT_FIFO_ADDR_WIDTH]; // 第 n 段写地址。
+    wire [SEG_WIDTH-1:0] wr_data = seg_mem_wr_data[n*SEG_WIDTH +: SEG_WIDTH]; // 第 n 段写数据。
 
-    wire rd_en = seg_mem_rd_en[n];
-    wire [INPUT_FIFO_ADDR_WIDTH-1:0] rd_addr = seg_mem_rd_addr_reg[n*INPUT_FIFO_ADDR_WIDTH +: INPUT_FIFO_ADDR_WIDTH];
-    reg [SEG_WIDTH-1:0] rd_data_reg = 0;
+    wire rd_en = seg_mem_rd_en[n]; // 第 n 段读使能。
+    wire [INPUT_FIFO_ADDR_WIDTH-1:0] rd_addr = seg_mem_rd_addr_reg[n*INPUT_FIFO_ADDR_WIDTH +: INPUT_FIFO_ADDR_WIDTH]; // 第 n 段读地址。
+    reg [SEG_WIDTH-1:0] rd_data_reg = 0; // 第 n 段读数据寄存器。
 
     assign seg_mem_rd_data[n*SEG_WIDTH +: SEG_WIDTH] = rd_data_reg;
 
@@ -229,15 +234,15 @@ end
 endgenerate
 
 (* ram_style = "distributed", ramstyle = "no_rw_check, mlab" *)
-reg [HDR_LEN_WIDTH-1:0] hdr_mem_len[2**HDR_FIFO_ADDR_WIDTH-1:0];
+reg [HDR_LEN_WIDTH-1:0] hdr_mem_len[2**HDR_FIFO_ADDR_WIDTH-1:0]; // 头 RAM：长度字段。
 (* ram_style = "distributed", ramstyle = "no_rw_check, mlab" *)
-reg hdr_mem_last[2**HDR_FIFO_ADDR_WIDTH-1:0];
+reg hdr_mem_last[2**HDR_FIFO_ADDR_WIDTH-1:0]; // 头 RAM：last 标志。
 (* ram_style = "distributed", ramstyle = "no_rw_check, mlab" *)
-reg [META_WIDTH-1:0] hdr_mem_meta[2**HDR_FIFO_ADDR_WIDTH-1:0];
+reg [META_WIDTH-1:0] hdr_mem_meta[2**HDR_FIFO_ADDR_WIDTH-1:0]; // 头 RAM：元数据字段。
 
-reg [HDR_LEN_WIDTH-1:0] hdr_mem_rd_len_reg = 0;
-reg hdr_mem_rd_last_reg = 1'b0;
-reg [META_WIDTH-1:0] hdr_mem_rd_meta_reg = 0;
+reg [HDR_LEN_WIDTH-1:0] hdr_mem_rd_len_reg = 0; // 头 RAM 读寄存：长度。
+reg hdr_mem_rd_last_reg = 1'b0; // 头 RAM 读寄存：last。
+reg [META_WIDTH-1:0] hdr_mem_rd_meta_reg = 0; // 头 RAM 读寄存：元数据。
 
 assign hdr_mem_rd_len = hdr_mem_rd_len_reg;
 assign hdr_mem_rd_last = hdr_mem_rd_last_reg;
@@ -259,7 +264,7 @@ always @(posedge clk) begin
     end
 end
 
-// limits
+// 限制条件计算
 always @(posedge clk) begin
     input_fifo_full_reg <= $unsigned(input_fifo_wr_ptr_reg - input_fifo_rd_ptr_reg) >= (2**INPUT_FIFO_ADDR_WIDTH*SEG_CNT_INT)-SEG_CNT_INT*2;
     input_fifo_half_full_reg <= $unsigned(input_fifo_wr_ptr_reg - input_fifo_rd_ptr_reg) >= (2**INPUT_FIFO_ADDR_WIDTH*SEG_CNT_INT)/2;
@@ -274,8 +279,8 @@ always @(posedge clk) begin
     end
 end
 
-// Split input segments
-integer si;
+// 输入分段拆分
+integer si; // 输入 AXIS 段拆分循环索引。
 
 always @* begin
     int_seg_data = s_axis_tdata;
@@ -294,29 +299,29 @@ always @* begin
     end
 end
 
-// Write logic
-integer seg, k;
-reg [SEG_IDX_WIDTH+1-1:0] seg_count;
-reg [SEG_IDX_WIDTH-1:0] cur_seg;
+// 写入控制逻辑
+integer seg, k; // 写路径组合处理循环索引（seg: 段, k: 字节通道）。
+reg [SEG_IDX_WIDTH+1-1:0] seg_count; // 本拍有效段数量计数。
+reg [SEG_IDX_WIDTH-1:0] cur_seg; // 当前写入段位置索引。
 
-reg frame_reg = 1'b0, frame_next;
-reg [HDR_LEN_WIDTH-1:0] len_reg = 0, len_next;
+reg frame_reg = 1'b0, frame_next; // 当前是否处于帧聚合状态。
+reg [HDR_LEN_WIDTH-1:0] len_reg = 0, len_next; // 当前聚合帧长度计数。
 
-reg cycle_valid_reg = 1'b0, cycle_valid_next;
-reg cycle_last_reg = 1'b0, cycle_last_next;
-reg [CL_AXIS_BYTE_LANES+1-1:0] cycle_len_reg = 0, cycle_len_next;
-reg [META_WIDTH-1:0] cycle_meta_reg = 0, cycle_meta_next;
+reg cycle_valid_reg = 1'b0, cycle_valid_next; // 缓存拍是否有效。
+reg cycle_last_reg = 1'b0, cycle_last_next; // 缓存拍是否 tlast。
+reg [CL_AXIS_BYTE_LANES+1-1:0] cycle_len_reg = 0, cycle_len_next; // 缓存拍有效字节数。
+reg [META_WIDTH-1:0] cycle_meta_reg = 0, cycle_meta_next; // 缓存拍元数据。
 
-reg [CL_AXIS_BYTE_LANES+1-1:0] cycle_len;
+reg [CL_AXIS_BYTE_LANES+1-1:0] cycle_len; // 当前输入拍有效字节数(组合计算)。
 
-reg [HDR_LEN_WIDTH-1:0] hdr_len_reg = 0, hdr_len_next;
-reg [META_WIDTH-1:0] hdr_meta_reg = 0, hdr_meta_next;
-reg hdr_last_reg = 0, hdr_last_next;
-reg hdr_commit_reg = 0, hdr_commit_next;
-reg hdr_commit_prev_reg = 0, hdr_commit_prev_next;
-reg hdr_valid_reg = 0, hdr_valid_next;
+reg [HDR_LEN_WIDTH-1:0] hdr_len_reg = 0, hdr_len_next; // 待写头信息长度字段。
+reg [META_WIDTH-1:0] hdr_meta_reg = 0, hdr_meta_next; // 待写头信息元数据字段。
+reg hdr_last_reg = 0, hdr_last_next; // 待写头信息的最后一拍标志。
+reg hdr_commit_reg = 0, hdr_commit_next; // 当前头是否提交。
+reg hdr_commit_prev_reg = 0, hdr_commit_prev_next; // 前一头是否提交(元数据切换场景)。
+reg hdr_valid_reg = 0, hdr_valid_next; // 待写头信息有效标志。
 
-wire [META_WIDTH-1:0] s_axis_meta;
+wire [META_WIDTH-1:0] s_axis_meta; // 从 AXIS 侧带信号打包后的元数据字段。
 
 generate
 
@@ -339,7 +344,7 @@ always @* begin
         cycle_len = AXIS_BYTE_LANES;
     end
 
-    // pack segments
+    // 打包分段
     seg_mem_wr_valid = 0;
     seg_mem_wr_sel = 0;
     cur_seg = input_fifo_wr_ptr_reg[SEG_IDX_WIDTH-1:0];
@@ -382,7 +387,7 @@ always @* begin
     hdr_valid_next = 1'b0;
 
     if (s_axis_tvalid && s_axis_tready) begin
-        // transfer data
+        // 传输数据
         seg_mem_wr_en = seg_mem_wr_valid;
         input_fifo_wr_ptr_next = input_fifo_wr_ptr_reg + seg_count;
         for (seg = 0; seg < SEG_CNT_INT; seg = seg + 1) begin
@@ -396,7 +401,7 @@ always @* begin
     end
 
     if (cycle_valid_reg) begin
-        // process packets
+        // 处理数据包
         if (!frame_reg) begin
             frame_next = 1'b1;
 
@@ -412,7 +417,7 @@ always @* begin
             hdr_valid_next = 1'b1;
 
             if (cycle_last_reg) begin
-                // end of frame
+                // 帧结束
 
                 hdr_commit_next = 1'b1;
 
@@ -439,7 +444,7 @@ always @* begin
             hdr_valid_next = 1'b1;
 
             if (cycle_meta_reg != hdr_meta_reg) begin
-                // meta changed
+                // 元数据变化
 
                 hdr_commit_prev_next = 1'b1;
 
@@ -448,7 +453,7 @@ always @* begin
                     frame_next = 1'b0;
                 end
             end else if (cycle_last_reg || len_next >= MAX_BLOCK_LEN) begin
-                // end of frame or block is full
+                // 帧结束或当前块已满
 
                 hdr_commit_next = 1'b1;
 
@@ -515,32 +520,32 @@ always @(posedge clk) begin
     end
 end
 
-// Read logic
-integer rd_seg;
-reg [SEG_IDX_WIDTH-1:0] cur_rd_seg;
-reg rd_valid;
+// 读出控制逻辑
+integer rd_seg; // 读路径段处理循环索引。
+reg [SEG_IDX_WIDTH-1:0] cur_rd_seg; // 当前读取段索引。
+reg rd_valid; // 当前读段是否有效。
 
-reg out_frame_reg = 1'b0, out_frame_next;
-reg [HDR_LEN_WIDTH-1:0] out_len_reg = 0, out_len_next;
-reg out_split1_reg = 1'b0, out_split1_next;
-reg [HDR_SEG_LEN_WIDTH-1:0] out_seg_cnt_in_reg = 0, out_seg_cnt_in_next;
-reg out_seg_last_straddle_reg = 1'b0, out_seg_last_straddle_next;
-reg [SEG_IDX_WIDTH-1:0] out_seg_offset_reg = 0, out_seg_offset_next;
-reg [SEG_IDX_WIDTH-1:0] out_seg_fifo_offset_reg = 0, out_seg_fifo_offset_next;
-reg [SEG_IDX_WIDTH+1-1:0] out_seg_count_reg = 0, out_seg_count_next;
+reg out_frame_reg = 1'b0, out_frame_next; // 输出组包是否处于帧内。
+reg [HDR_LEN_WIDTH-1:0] out_len_reg = 0, out_len_next; // 当前输出帧剩余长度。
+reg out_split1_reg = 1'b0, out_split1_next; // 当前输出是否处于 split1 阶段。
+reg [HDR_SEG_LEN_WIDTH-1:0] out_seg_cnt_in_reg = 0, out_seg_cnt_in_next; // 输入段计数缓存。
+reg out_seg_last_straddle_reg = 1'b0, out_seg_last_straddle_next; // 最后一段是否跨越分段边界。
+reg [SEG_IDX_WIDTH-1:0] out_seg_offset_reg = 0, out_seg_offset_next; // 输出段偏移。
+reg [SEG_IDX_WIDTH-1:0] out_seg_fifo_offset_reg = 0, out_seg_fifo_offset_next; // FIFO 段偏移。
+reg [SEG_IDX_WIDTH+1-1:0] out_seg_count_reg = 0, out_seg_count_next; // 本拍输出段计数。
 
-reg [HDR_WIDTH-1:0] out_hdr_reg = 0, out_hdr_next;
+reg [HDR_WIDTH-1:0] out_hdr_reg = 0, out_hdr_next; // 当前输出头缓存。
 
-reg [SEG_CNT_INT-1:0] out_ctl_seg_hdr_reg = 0, out_ctl_seg_hdr_next, out_ctl_seg_hdr_raw;
-reg [SEG_CNT_INT-1:0] out_ctl_seg_split1_reg = 0, out_ctl_seg_split1_next, out_ctl_seg_split1_raw;
-reg [SEG_CNT_INT-1:0] out_ctl_seg_en_reg = 0, out_ctl_seg_en_next, out_ctl_seg_en_raw;
-reg [SEG_IDX_WIDTH-1:0] out_ctl_seg_idx_reg[SEG_CNT_INT-1:0], out_ctl_seg_idx_next[SEG_CNT_INT-1:0];
-reg [SEG_IDX_WIDTH-1:0] out_ctl_seg_offset_reg = 0, out_ctl_seg_offset_next;
+reg [SEG_CNT_INT-1:0] out_ctl_seg_hdr_reg = 0, out_ctl_seg_hdr_next, out_ctl_seg_hdr_raw; // 每段是否输出头数据标志。
+reg [SEG_CNT_INT-1:0] out_ctl_seg_split1_reg = 0, out_ctl_seg_split1_next, out_ctl_seg_split1_raw; // 每段 split1 阶段标志。
+reg [SEG_CNT_INT-1:0] out_ctl_seg_en_reg = 0, out_ctl_seg_en_next, out_ctl_seg_en_raw; // 每段输出使能标志。
+reg [SEG_IDX_WIDTH-1:0] out_ctl_seg_idx_reg[SEG_CNT_INT-1:0], out_ctl_seg_idx_next[SEG_CNT_INT-1:0]; // 每段对应的输入段索引。
+reg [SEG_IDX_WIDTH-1:0] out_ctl_seg_offset_reg = 0, out_ctl_seg_offset_next; // 输出段偏移控制寄存器。
 
-reg [HDR_WIDTH-1:0] out_shift_reg = 0, out_shift_next;
+reg [HDR_WIDTH-1:0] out_shift_reg = 0, out_shift_next; // 头部跨段移位缓存。
 
-reg [7:0] block_timeout_count_reg = 0, block_timeout_count_next;
-reg block_timeout_reg = 0, block_timeout_next;
+reg [7:0] block_timeout_count_reg = 0, block_timeout_count_next; // 部分块超时计数器。
+reg block_timeout_reg = 0, block_timeout_next; // 部分块超时触发标志。
 
 always @* begin
     input_fifo_rd_ptr_next = input_fifo_rd_ptr_reg;
@@ -580,7 +585,7 @@ always @* begin
         out_ctl_seg_idx_next[seg] = out_seg_fifo_offset_reg - out_seg_offset_reg + seg;
     end
 
-    // partial block timeout handling
+    // 部分块超时处理
     block_timeout_count_next = block_timeout_count_reg;
     block_timeout_next = block_timeout_count_reg == 0;
     if (output_valid || out_seg_offset_reg == 0) begin
@@ -590,7 +595,7 @@ always @* begin
         block_timeout_count_next = block_timeout_count_reg - 1;
     end
 
-    // process headers and generate output commands
+    // 处理头信息并生成输出控制命令
     if (!fifo_watermark_in) begin
         if (out_frame_reg) begin
             if (out_seg_cnt_in_next >= SEG_CNT_INT) begin
@@ -659,7 +664,7 @@ always @* begin
 
                 hdr_mem_rd_data_valid_next = 1'b0;
             end else if (block_timeout_reg && out_seg_offset_reg) begin
-                // insert padding
+                // 插入填充
                 out_hdr_next[15:0] = 0;
 
                 out_ctl_seg_en_raw = {SEG_CNT_INT{1'b1}} >> out_seg_offset_reg;
@@ -677,7 +682,7 @@ always @* begin
 
     out_shift_next = out_shift_reg;
 
-    // mux segments
+    // 分段复用
     cur_rd_seg = out_ctl_seg_offset_reg;
     for (rd_seg = 0; rd_seg < SEG_CNT_INT; rd_seg = rd_seg + 1) begin
         output_data_next[cur_rd_seg*SEG_WIDTH +: SEG_WIDTH] = out_shift_next;
@@ -700,7 +705,7 @@ always @* begin
         cur_rd_seg = cur_rd_seg + 1;
     end
 
-    // read segments
+    // 读取分段数据
     cur_rd_seg = input_fifo_rd_ptr_reg[SEG_IDX_WIDTH-1:0];
     rd_valid = 1;
     for (rd_seg = 0; rd_seg < SEG_CNT_INT; rd_seg = rd_seg + 1) begin
@@ -715,7 +720,7 @@ always @* begin
         cur_rd_seg = cur_rd_seg + 1;
     end
 
-    // read header
+    // 读取头信息
     if (!hdr_mem_rd_data_valid_next && !hdr_fifo_empty_reg) begin
         hdr_fifo_rd_ptr_next = hdr_fifo_rd_ptr_reg + 1;
         hdr_mem_rd_en = 1'b1;
@@ -724,7 +729,7 @@ always @* begin
     end
 end
 
-integer i;
+integer i; // 输出打包时的段循环索引。
 
 always @(posedge clk) begin
     input_fifo_rd_ptr_reg <= input_fifo_rd_ptr_next;

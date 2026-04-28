@@ -4,3 +4,9 @@
 *.vvp
 *.kate-swp
 
+# Local simulation and viewer artifacts
+.idea/
+.venv/
+tb/**/sim_build/
+wave_boya.db*
+

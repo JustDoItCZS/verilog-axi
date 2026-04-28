@@ -22,160 +22,165 @@ THE SOFTWARE.
 
 */
 
-// Language: Verilog 2001
+// 语言: Verilog 2001
 
 `resetall
 `timescale 1ns / 1ps
 `default_nettype none
 
 /*
- * AXI4 register
+ * AXI4 寄存器切片
+ *
+ * 模块目录
+ * 1) 封装写通道寄存切片（`axi_register_wr`）。
+ * 2) 封装读通道寄存切片（`axi_register_rd`）。
+ * 3) 本模块无本地数据通路状态，全部缓冲行为由子模块实现。
  */
 module axi_register #
 (
-    // Width of data bus in bits
+    // 数据总线位宽
     parameter DATA_WIDTH = 32,
-    // Width of address bus in bits
+    // 地址总线位宽
     parameter ADDR_WIDTH = 32,
-    // Width of wstrb (width of data bus in words)
+    // WSTRB 位宽（按字节）
     parameter STRB_WIDTH = (DATA_WIDTH/8),
-    // Width of ID signal
+    // ID 信号位宽
     parameter ID_WIDTH = 8,
-    // Propagate awuser signal
+    // 是否透传 AWUSER 信号
     parameter AWUSER_ENABLE = 0,
-    // Width of awuser signal
+    // AWUSER 位宽
     parameter AWUSER_WIDTH = 1,
-    // Propagate wuser signal
+    // 是否透传 WUSER 信号
     parameter WUSER_ENABLE = 0,
-    // Width of wuser signal
+    // WUSER 位宽
     parameter WUSER_WIDTH = 1,
-    // Propagate buser signal
+    // 是否透传 BUSER 信号
     parameter BUSER_ENABLE = 0,
-    // Width of buser signal
+    // BUSER 位宽
     parameter BUSER_WIDTH = 1,
-    // Propagate aruser signal
+    // 是否透传 ARUSER 信号
     parameter ARUSER_ENABLE = 0,
-    // Width of aruser signal
+    // ARUSER 位宽
     parameter ARUSER_WIDTH = 1,
-    // Propagate ruser signal
+    // 是否透传 RUSER 信号
     parameter RUSER_ENABLE = 0,
-    // Width of ruser signal
+    // RUSER 位宽
     parameter RUSER_WIDTH = 1,
-    // AW channel register type
-    // 0 to bypass, 1 for simple buffer, 2 for skid buffer
+    // AW 通道寄存类型
+    // 0 表示旁路，1 表示简单缓冲，2 表示 skid buffer
     parameter AW_REG_TYPE = 1,
-    // W channel register type
-    // 0 to bypass, 1 for simple buffer, 2 for skid buffer
+    // W 通道寄存类型
+    // 0 表示旁路，1 表示简单缓冲，2 表示 skid buffer
     parameter W_REG_TYPE = 2,
-    // B channel register type
-    // 0 to bypass, 1 for simple buffer, 2 for skid buffer
+    // B 通道寄存类型
+    // 0 表示旁路，1 表示简单缓冲，2 表示 skid buffer
     parameter B_REG_TYPE = 1,
-    // AR channel register type
-    // 0 to bypass, 1 for simple buffer, 2 for skid buffer
+    // AR 通道寄存类型
+    // 0 表示旁路，1 表示简单缓冲，2 表示 skid buffer
     parameter AR_REG_TYPE = 1,
-    // R channel register type
-    // 0 to bypass, 1 for simple buffer, 2 for skid buffer
+    // R 通道寄存类型
+    // 0 表示旁路，1 表示简单缓冲，2 表示 skid buffer
     parameter R_REG_TYPE = 2
 )
 (
-    input  wire                     clk,
-    input  wire                     rst,
+    input  wire                     clk, // 读写寄存切片共享时钟。
+    input  wire                     rst, // 读写寄存切片共享同步复位。
 
     /*
-     * AXI slave interface
+     * AXI 从接口
      */
-    input  wire [ID_WIDTH-1:0]      s_axi_awid,
-    input  wire [ADDR_WIDTH-1:0]    s_axi_awaddr,
-    input  wire [7:0]               s_axi_awlen,
-    input  wire [2:0]               s_axi_awsize,
-    input  wire [1:0]               s_axi_awburst,
-    input  wire                     s_axi_awlock,
-    input  wire [3:0]               s_axi_awcache,
-    input  wire [2:0]               s_axi_awprot,
-    input  wire [3:0]               s_axi_awqos,
-    input  wire [3:0]               s_axi_awregion,
-    input  wire [AWUSER_WIDTH-1:0]  s_axi_awuser,
-    input  wire                     s_axi_awvalid,
-    output wire                     s_axi_awready,
-    input  wire [DATA_WIDTH-1:0]    s_axi_wdata,
-    input  wire [STRB_WIDTH-1:0]    s_axi_wstrb,
-    input  wire                     s_axi_wlast,
-    input  wire [WUSER_WIDTH-1:0]   s_axi_wuser,
-    input  wire                     s_axi_wvalid,
-    output wire                     s_axi_wready,
-    output wire [ID_WIDTH-1:0]      s_axi_bid,
-    output wire [1:0]               s_axi_bresp,
-    output wire [BUSER_WIDTH-1:0]   s_axi_buser,
-    output wire                     s_axi_bvalid,
-    input  wire                     s_axi_bready,
-    input  wire [ID_WIDTH-1:0]      s_axi_arid,
-    input  wire [ADDR_WIDTH-1:0]    s_axi_araddr,
-    input  wire [7:0]               s_axi_arlen,
-    input  wire [2:0]               s_axi_arsize,
-    input  wire [1:0]               s_axi_arburst,
-    input  wire                     s_axi_arlock,
-    input  wire [3:0]               s_axi_arcache,
-    input  wire [2:0]               s_axi_arprot,
-    input  wire [3:0]               s_axi_arqos,
-    input  wire [3:0]               s_axi_arregion,
-    input  wire [ARUSER_WIDTH-1:0]  s_axi_aruser,
-    input  wire                     s_axi_arvalid,
-    output wire                     s_axi_arready,
-    output wire [ID_WIDTH-1:0]      s_axi_rid,
-    output wire [DATA_WIDTH-1:0]    s_axi_rdata,
-    output wire [1:0]               s_axi_rresp,
-    output wire                     s_axi_rlast,
-    output wire [RUSER_WIDTH-1:0]   s_axi_ruser,
-    output wire                     s_axi_rvalid,
-    input  wire                     s_axi_rready,
+    input  wire [ID_WIDTH-1:0]      s_axi_awid, // 从侧 AW ID。
+    input  wire [ADDR_WIDTH-1:0]    s_axi_awaddr, // 从侧 AW 地址。
+    input  wire [7:0]               s_axi_awlen, // 从侧 AW 突发长度。
+    input  wire [2:0]               s_axi_awsize, // 从侧 AW 突发粒度。
+    input  wire [1:0]               s_axi_awburst, // 从侧 AW 突发类型。
+    input  wire                     s_axi_awlock, // 从侧 AW 锁属性。
+    input  wire [3:0]               s_axi_awcache, // 从侧 AW cache 属性。
+    input  wire [2:0]               s_axi_awprot, // 从侧 AW 保护属性。
+    input  wire [3:0]               s_axi_awqos, // 从侧 AW QoS。
+    input  wire [3:0]               s_axi_awregion, // 从侧 AW region。
+    input  wire [AWUSER_WIDTH-1:0]  s_axi_awuser, // 从侧 AW 用户旁带。
+    input  wire                     s_axi_awvalid, // 从侧 AWVALID。
+    output wire                     s_axi_awready, // 从侧 AWREADY。
+    input  wire [DATA_WIDTH-1:0]    s_axi_wdata, // 从侧 W 数据。
+    input  wire [STRB_WIDTH-1:0]    s_axi_wstrb, // 从侧 W 字节使能。
+    input  wire                     s_axi_wlast, // 从侧 WLAST。
+    input  wire [WUSER_WIDTH-1:0]   s_axi_wuser, // 从侧 W 用户旁带。
+    input  wire                     s_axi_wvalid, // 从侧 WVALID。
+    output wire                     s_axi_wready, // 从侧 WREADY。
+    output wire [ID_WIDTH-1:0]      s_axi_bid, // 从侧 B ID（来自下游）。
+    output wire [1:0]               s_axi_bresp, // 从侧 B 响应码。
+    output wire [BUSER_WIDTH-1:0]   s_axi_buser, // 从侧 B 用户旁带。
+    output wire                     s_axi_bvalid, // 从侧 BVALID。
+    input  wire                     s_axi_bready, // 从侧 BREADY。
+    input  wire [ID_WIDTH-1:0]      s_axi_arid, // 从侧 AR ID。
+    input  wire [ADDR_WIDTH-1:0]    s_axi_araddr, // 从侧 AR 地址。
+    input  wire [7:0]               s_axi_arlen, // 从侧 AR 突发长度。
+    input  wire [2:0]               s_axi_arsize, // 从侧 AR 突发粒度。
+    input  wire [1:0]               s_axi_arburst, // 从侧 AR 突发类型。
+    input  wire                     s_axi_arlock, // 从侧 AR 锁属性。
+    input  wire [3:0]               s_axi_arcache, // 从侧 AR cache 属性。
+    input  wire [2:0]               s_axi_arprot, // 从侧 AR 保护属性。
+    input  wire [3:0]               s_axi_arqos, // 从侧 AR QoS。
+    input  wire [3:0]               s_axi_arregion, // 从侧 AR region。
+    input  wire [ARUSER_WIDTH-1:0]  s_axi_aruser, // 从侧 AR 用户旁带。
+    input  wire                     s_axi_arvalid, // 从侧 ARVALID。
+    output wire                     s_axi_arready, // 从侧 ARREADY。
+    output wire [ID_WIDTH-1:0]      s_axi_rid, // 从侧 R ID。
+    output wire [DATA_WIDTH-1:0]    s_axi_rdata, // 从侧 R 数据。
+    output wire [1:0]               s_axi_rresp, // 从侧 R 响应。
+    output wire                     s_axi_rlast, // 从侧 RLAST。
+    output wire [RUSER_WIDTH-1:0]   s_axi_ruser, // 从侧 R 用户旁带。
+    output wire                     s_axi_rvalid, // 从侧 RVALID。
+    input  wire                     s_axi_rready, // 从侧 RREADY。
 
     /*
-     * AXI master interface
+     * AXI 主接口
      */
-    output wire [ID_WIDTH-1:0]      m_axi_awid,
-    output wire [ADDR_WIDTH-1:0]    m_axi_awaddr,
-    output wire [7:0]               m_axi_awlen,
-    output wire [2:0]               m_axi_awsize,
-    output wire [1:0]               m_axi_awburst,
-    output wire                     m_axi_awlock,
-    output wire [3:0]               m_axi_awcache,
-    output wire [2:0]               m_axi_awprot,
-    output wire [3:0]               m_axi_awqos,
-    output wire [3:0]               m_axi_awregion,
-    output wire [AWUSER_WIDTH-1:0]  m_axi_awuser,
-    output wire                     m_axi_awvalid,
-    input  wire                     m_axi_awready,
-    output wire [DATA_WIDTH-1:0]    m_axi_wdata,
-    output wire [STRB_WIDTH-1:0]    m_axi_wstrb,
-    output wire                     m_axi_wlast,
-    output wire [WUSER_WIDTH-1:0]   m_axi_wuser,
-    output wire                     m_axi_wvalid,
-    input  wire                     m_axi_wready,
-    input  wire [ID_WIDTH-1:0]      m_axi_bid,
-    input  wire [1:0]               m_axi_bresp,
-    input  wire [BUSER_WIDTH-1:0]   m_axi_buser,
-    input  wire                     m_axi_bvalid,
-    output wire                     m_axi_bready,
-    output wire [ID_WIDTH-1:0]      m_axi_arid,
-    output wire [ADDR_WIDTH-1:0]    m_axi_araddr,
-    output wire [7:0]               m_axi_arlen,
-    output wire [2:0]               m_axi_arsize,
-    output wire [1:0]               m_axi_arburst,
-    output wire                     m_axi_arlock,
-    output wire [3:0]               m_axi_arcache,
-    output wire [2:0]               m_axi_arprot,
-    output wire [3:0]               m_axi_arqos,
-    output wire [3:0]               m_axi_arregion,
-    output wire [ARUSER_WIDTH-1:0]  m_axi_aruser,
-    output wire                     m_axi_arvalid,
-    input  wire                     m_axi_arready,
-    input  wire [ID_WIDTH-1:0]      m_axi_rid,
-    input  wire [DATA_WIDTH-1:0]    m_axi_rdata,
-    input  wire [1:0]               m_axi_rresp,
-    input  wire                     m_axi_rlast,
-    input  wire [RUSER_WIDTH-1:0]   m_axi_ruser,
-    input  wire                     m_axi_rvalid,
-    output wire                     m_axi_rready
+    output wire [ID_WIDTH-1:0]      m_axi_awid, // 主侧 AW ID。
+    output wire [ADDR_WIDTH-1:0]    m_axi_awaddr, // 主侧 AW 地址。
+    output wire [7:0]               m_axi_awlen, // 主侧 AW 突发长度。
+    output wire [2:0]               m_axi_awsize, // 主侧 AW 突发粒度。
+    output wire [1:0]               m_axi_awburst, // 主侧 AW 突发类型。
+    output wire                     m_axi_awlock, // 主侧 AW 锁属性。
+    output wire [3:0]               m_axi_awcache, // 主侧 AW cache 属性。
+    output wire [2:0]               m_axi_awprot, // 主侧 AW 保护属性。
+    output wire [3:0]               m_axi_awqos, // 主侧 AW QoS。
+    output wire [3:0]               m_axi_awregion, // 主侧 AW region。
+    output wire [AWUSER_WIDTH-1:0]  m_axi_awuser, // 主侧 AW 用户旁带。
+    output wire                     m_axi_awvalid, // 主侧 AWVALID。
+    input  wire                     m_axi_awready, // 主侧 AWREADY。
+    output wire [DATA_WIDTH-1:0]    m_axi_wdata, // 主侧 W 数据。
+    output wire [STRB_WIDTH-1:0]    m_axi_wstrb, // 主侧 W 字节使能。
+    output wire                     m_axi_wlast, // 主侧 WLAST。
+    output wire [WUSER_WIDTH-1:0]   m_axi_wuser, // 主侧 W 用户旁带。
+    output wire                     m_axi_wvalid, // 主侧 WVALID。
+    input  wire                     m_axi_wready, // 主侧 WREADY。
+    input  wire [ID_WIDTH-1:0]      m_axi_bid, // 主侧 B ID（来自下游）。
+    input  wire [1:0]               m_axi_bresp, // 主侧 B 响应。
+    input  wire [BUSER_WIDTH-1:0]   m_axi_buser, // 主侧 B 用户旁带。
+    input  wire                     m_axi_bvalid, // 主侧 BVALID。
+    output wire                     m_axi_bready, // 主侧 BREADY。
+    output wire [ID_WIDTH-1:0]      m_axi_arid, // 主侧 AR ID。
+    output wire [ADDR_WIDTH-1:0]    m_axi_araddr, // 主侧 AR 地址。
+    output wire [7:0]               m_axi_arlen, // 主侧 AR 突发长度。
+    output wire [2:0]               m_axi_arsize, // 主侧 AR 突发粒度。
+    output wire [1:0]               m_axi_arburst, // 主侧 AR 突发类型。
+    output wire                     m_axi_arlock, // 主侧 AR 锁属性。
+    output wire [3:0]               m_axi_arcache, // 主侧 AR cache 属性。
+    output wire [2:0]               m_axi_arprot, // 主侧 AR 保护属性。
+    output wire [3:0]               m_axi_arqos, // 主侧 AR QoS。
+    output wire [3:0]               m_axi_arregion, // 主侧 AR region。
+    output wire [ARUSER_WIDTH-1:0]  m_axi_aruser, // 主侧 AR 用户旁带。
+    output wire                     m_axi_arvalid, // 主侧 ARVALID。
+    input  wire                     m_axi_arready, // 主侧 ARREADY。
+    input  wire [ID_WIDTH-1:0]      m_axi_rid, // 主侧 R ID（来自下游）。
+    input  wire [DATA_WIDTH-1:0]    m_axi_rdata, // 主侧 R 数据。
+    input  wire [1:0]               m_axi_rresp, // 主侧 R 响应。
+    input  wire                     m_axi_rlast, // 主侧 RLAST。
+    input  wire [RUSER_WIDTH-1:0]   m_axi_ruser, // 主侧 R 用户旁带。
+    input  wire                     m_axi_rvalid, // 主侧 RVALID。
+    output wire                     m_axi_rready // 主侧 RREADY。
 );
 
 axi_register_wr #(
@@ -198,7 +203,7 @@ axi_register_wr_inst (
     .rst(rst),
 
     /*
-     * AXI slave interface
+     * AXI 从接口
      */
     .s_axi_awid(s_axi_awid),
     .s_axi_awaddr(s_axi_awaddr),
@@ -226,7 +231,7 @@ axi_register_wr_inst (
     .s_axi_bready(s_axi_bready),
 
     /*
-     * AXI master interface
+     * AXI 主接口
      */
     .m_axi_awid(m_axi_awid),
     .m_axi_awaddr(m_axi_awaddr),
@@ -271,7 +276,7 @@ axi_register_rd_inst (
     .rst(rst),
 
     /*
-     * AXI slave interface
+     * AXI 从接口
      */
     .s_axi_arid(s_axi_arid),
     .s_axi_araddr(s_axi_araddr),
@@ -295,7 +300,7 @@ axi_register_rd_inst (
     .s_axi_rready(s_axi_rready),
 
     /*
-     * AXI master interface
+     * AXI 主接口
      */
     .m_axi_arid(m_axi_arid),
     .m_axi_araddr(m_axi_araddr),

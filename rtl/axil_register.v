@@ -22,88 +22,94 @@ THE SOFTWARE.
 
 */
 
-// Language: Verilog 2001
+// 语言: Verilog 2001
 
 `resetall
 `timescale 1ns / 1ps
 `default_nettype none
 
 /*
- * AXI4 lite register
+ * AXI4-Lite 寄存器切片
+ *
+ * 模块目录
+ * 1) 对外提供一组 AXI-Lite 从接口和一组 AXI-Lite 主接口。
+ * 2) 写通道流水化由 axil_register_wr 实现。
+ * 3) 读通道流水化由 axil_register_rd 实现。
+ * 4) 每个通道可按参数选择旁路或一级寄存缓冲。
  */
 module axil_register #
 (
-    // Width of data bus in bits
+    // 数据总线位宽
     parameter DATA_WIDTH = 32,
-    // Width of address bus in bits
+    // 地址总线位宽
     parameter ADDR_WIDTH = 32,
-    // Width of wstrb (width of data bus in words)
+    // WSTRB 位宽（按字节）
     parameter STRB_WIDTH = (DATA_WIDTH/8),
-    // AW channel register type
-    // 0 to bypass, 1 for simple buffer
+    // AW 通道寄存类型
+    // 0 表示旁路，1 表示简单一级缓冲
     parameter AW_REG_TYPE = 1,
-    // W channel register type
-    // 0 to bypass, 1 for simple buffer
+    // W 通道寄存类型
+    // 0 表示旁路，1 表示简单一级缓冲
     parameter W_REG_TYPE = 1,
-    // B channel register type
-    // 0 to bypass, 1 for simple buffer
+    // B 通道寄存类型
+    // 0 表示旁路，1 表示简单一级缓冲
     parameter B_REG_TYPE = 1,
-    // AR channel register type
-    // 0 to bypass, 1 for simple buffer
+    // AR 通道寄存类型
+    // 0 表示旁路，1 表示简单一级缓冲
     parameter AR_REG_TYPE = 1,
-    // R channel register type
-    // 0 to bypass, 1 for simple buffer
+    // R 通道寄存类型
+    // 0 表示旁路，1 表示简单一级缓冲
     parameter R_REG_TYPE = 1
 )
 (
-    input  wire                     clk,
-    input  wire                     rst,
+    input  wire                     clk,            // 读写寄存切片共享时钟。
+    input  wire                     rst,            // 所有通道缓冲状态同步复位。
 
     /*
-     * AXI lite slave interface
+     * AXI-Lite 从接口
      */
-    input  wire [ADDR_WIDTH-1:0]    s_axil_awaddr,
-    input  wire [2:0]               s_axil_awprot,
-    input  wire                     s_axil_awvalid,
-    output wire                     s_axil_awready,
-    input  wire [DATA_WIDTH-1:0]    s_axil_wdata,
-    input  wire [STRB_WIDTH-1:0]    s_axil_wstrb,
-    input  wire                     s_axil_wvalid,
-    output wire                     s_axil_wready,
-    output wire [1:0]               s_axil_bresp,
-    output wire                     s_axil_bvalid,
-    input  wire                     s_axil_bready,
-    input  wire [ADDR_WIDTH-1:0]    s_axil_araddr,
-    input  wire [2:0]               s_axil_arprot,
-    input  wire                     s_axil_arvalid,
-    output wire                     s_axil_arready,
-    output wire [DATA_WIDTH-1:0]    s_axil_rdata,
-    output wire [1:0]               s_axil_rresp,
-    output wire                     s_axil_rvalid,
-    input  wire                     s_axil_rready,
+    input  wire [ADDR_WIDTH-1:0]    s_axil_awaddr,  // 进入寄存切片的从侧 AW 地址。
+    input  wire [2:0]               s_axil_awprot,  // 从侧 AW 保护属性。
+    input  wire                     s_axil_awvalid, // 从侧 AW 有效。
+    output wire                     s_axil_awready, // 从侧 AW 就绪（经可选 AW 缓冲后）。
+    input  wire [DATA_WIDTH-1:0]    s_axil_wdata,   // 从侧 W 数据。
+    input  wire [STRB_WIDTH-1:0]    s_axil_wstrb,   // 从侧 W 字节使能。
+    input  wire                     s_axil_wvalid,  // 从侧 W 有效。
+    output wire                     s_axil_wready,  // 从侧 W 就绪（经可选 W 缓冲后）。
+    output wire [1:0]               s_axil_bresp,   // 从侧 B 响应（来自下游主侧路径）。
+    output wire                     s_axil_bvalid,  // 从侧 B 有效（经可选 B 缓冲后）。
+    input  wire                     s_axil_bready,  // 从侧 B 就绪。
+    input  wire [ADDR_WIDTH-1:0]    s_axil_araddr,  // 进入寄存切片的从侧 AR 地址。
+    input  wire [2:0]               s_axil_arprot,  // 从侧 AR 保护属性。
+    input  wire                     s_axil_arvalid, // 从侧 AR 有效。
+    output wire                     s_axil_arready, // 从侧 AR 就绪（经可选 AR 缓冲后）。
+    output wire [DATA_WIDTH-1:0]    s_axil_rdata,   // 从侧 R 数据（来自下游主侧路径）。
+    output wire [1:0]               s_axil_rresp,   // 从侧 R 响应（来自下游主侧路径）。
+    output wire                     s_axil_rvalid,  // 从侧 R 有效（经可选 R 缓冲后）。
+    input  wire                     s_axil_rready,  // 从侧 R 就绪。
 
     /*
-     * AXI lite master interface
+     * AXI-Lite 主接口
      */
-    output wire [ADDR_WIDTH-1:0]    m_axil_awaddr,
-    output wire [2:0]               m_axil_awprot,
-    output wire                     m_axil_awvalid,
-    input  wire                     m_axil_awready,
-    output wire [DATA_WIDTH-1:0]    m_axil_wdata,
-    output wire [STRB_WIDTH-1:0]    m_axil_wstrb,
-    output wire                     m_axil_wvalid,
-    input  wire                     m_axil_wready,
-    input  wire [1:0]               m_axil_bresp,
-    input  wire                     m_axil_bvalid,
-    output wire                     m_axil_bready,
-    output wire [ADDR_WIDTH-1:0]    m_axil_araddr,
-    output wire [2:0]               m_axil_arprot,
-    output wire                     m_axil_arvalid,
-    input  wire                     m_axil_arready,
-    input  wire [DATA_WIDTH-1:0]    m_axil_rdata,
-    input  wire [1:0]               m_axil_rresp,
-    input  wire                     m_axil_rvalid,
-    output wire                     m_axil_rready
+    output wire [ADDR_WIDTH-1:0]    m_axil_awaddr,  // 主侧 AW 地址（发往下游目标）。
+    output wire [2:0]               m_axil_awprot,  // 主侧 AW 保护属性。
+    output wire                     m_axil_awvalid, // 主侧 AW 有效（经可选 AW 缓冲后）。
+    input  wire                     m_axil_awready, // 主侧 AW 就绪（来自下游目标）。
+    output wire [DATA_WIDTH-1:0]    m_axil_wdata,   // 主侧 W 数据。
+    output wire [STRB_WIDTH-1:0]    m_axil_wstrb,   // 主侧 W 字节使能。
+    output wire                     m_axil_wvalid,  // 主侧 W 有效（经可选 W 缓冲后）。
+    input  wire                     m_axil_wready,  // 主侧 W 就绪（来自下游目标）。
+    input  wire [1:0]               m_axil_bresp,   // 主侧 B 响应（来自下游目标）。
+    input  wire                     m_axil_bvalid,  // 主侧 B 有效（来自下游目标）。
+    output wire                     m_axil_bready,  // 主侧 B 就绪（经可选 B 缓冲后）。
+    output wire [ADDR_WIDTH-1:0]    m_axil_araddr,  // 主侧 AR 地址（发往下游目标）。
+    output wire [2:0]               m_axil_arprot,  // 主侧 AR 保护属性。
+    output wire                     m_axil_arvalid, // 主侧 AR 有效（经可选 AR 缓冲后）。
+    input  wire                     m_axil_arready, // 主侧 AR 就绪（来自下游目标）。
+    input  wire [DATA_WIDTH-1:0]    m_axil_rdata,   // 主侧 R 数据（来自下游目标）。
+    input  wire [1:0]               m_axil_rresp,   // 主侧 R 响应（来自下游目标）。
+    input  wire                     m_axil_rvalid,  // 主侧 R 有效（来自下游目标）。
+    output wire                     m_axil_rready   // 主侧 R 就绪（经可选 R 缓冲后）。
 );
 
 axil_register_wr #(
@@ -119,7 +125,7 @@ axil_register_wr_inst (
     .rst(rst),
 
     /*
-     * AXI lite slave interface
+     * AXI-Lite 从接口
      */
     .s_axil_awaddr(s_axil_awaddr),
     .s_axil_awprot(s_axil_awprot),
@@ -134,7 +140,7 @@ axil_register_wr_inst (
     .s_axil_bready(s_axil_bready),
 
     /*
-     * AXI lite master interface
+     * AXI-Lite 主接口
      */
     .m_axil_awaddr(m_axil_awaddr),
     .m_axil_awprot(m_axil_awprot),
@@ -161,7 +167,7 @@ axil_register_rd_inst (
     .rst(rst),
 
     /*
-     * AXI lite slave interface
+     * AXI-Lite 从接口
      */
     .s_axil_araddr(s_axil_araddr),
     .s_axil_arprot(s_axil_arprot),
@@ -173,7 +179,7 @@ axil_register_rd_inst (
     .s_axil_rready(s_axil_rready),
 
     /*
-     * AXI lite master interface
+     * AXI-Lite 主接口
      */
     .m_axil_araddr(m_axil_araddr),
     .m_axil_arprot(m_axil_arprot),
